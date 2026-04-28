@@ -7,6 +7,7 @@ import type { Game } from "../game/Game";
 import type { AutoPlayer } from "../autoplay/AutoPlayer";
 
 const ANIMATION_DURATION_MS = 150;
+const ANIMATION_BUFFER_MS = 20;
 const TILE_COLORS: Record<number, { bg: string; fg: string }> = {
   2:     { bg: "#eee4da", fg: "#776e65" },
   4:     { bg: "#ede0c8", fg: "#776e65" },
@@ -46,7 +47,7 @@ export class Renderer {
     this.boardGrid = document.getElementById("board-grid")!;
     this.boardTiles = document.getElementById("board-tiles")!;
 
-    game.setAnimationDuration(ANIMATION_DURATION_MS + 20); // small buffer
+    game.setAnimationDuration(ANIMATION_DURATION_MS + ANIMATION_BUFFER_MS); // small buffer
 
     this.buildGrid();
     this.render(game.getBoardSnapshot());
@@ -83,8 +84,6 @@ export class Renderer {
   async animateMove(result: MoveResult): Promise<void> {
     if (!result.moved) return;
 
-    const mergedSet = new Set(result.mergedTiles.flatMap((m) => [...m.sourceIds]));
-
     // Move tiles to new positions
     for (const moved of result.movedTiles) {
       const el = this.tileElements.get(moved.id);
@@ -106,31 +105,20 @@ export class Renderer {
         }
       }
 
-      // Create the merged tile element
-      const mergedTileData = result.nextBoardSnapshot.tiles.find(
-        (t) => t.id === merged.resultId
-      );
-      if (mergedTileData) {
-        const el = this.createTileElement(mergedTileData);
-        el.classList.add("tile-merged");
-        this.boardTiles.appendChild(el);
-        this.tileElements.set(merged.resultId, el);
-      }
-    }
-
-    // Remove tiles that were in prev but not in next (accounted above)
-    const nextIds = new Set(result.nextBoardSnapshot.tiles.map((t) => t.id));
-    for (const [id, el] of this.tileElements) {
-      if (!nextIds.has(id)) {
-        // moved tiles that should not appear anymore (merged sources already removed)
-        if (!mergedSet.has(id)) {
-          el.remove();
-          this.tileElements.delete(id);
-        }
-      }
+      const mergedTileData: Tile = {
+        id: merged.resultId,
+        value: merged.value,
+        row: merged.row,
+        col: merged.col,
+      };
+      const el = this.createTileElement(mergedTileData);
+      el.classList.add("tile-merged");
+      this.boardTiles.appendChild(el);
+      this.tileElements.set(merged.resultId, el);
     }
 
     // Spawn new tile
+    await delay(ANIMATION_BUFFER_MS);
     if (result.spawnedTile) {
       const existing = this.tileElements.get(result.spawnedTile.id);
       if (!existing) {

@@ -83,7 +83,9 @@ export class Renderer {
   async animateMove(result: MoveResult): Promise<void> {
     if (!result.moved) return;
 
-    const mergedSet = new Set(result.mergedTiles.flatMap((m) => [...m.sourceIds]));
+    const mergedSourceIds = new Set(
+      result.mergedTiles.flatMap((m) => [...m.sourceIds])
+    );
 
     // Move tiles to new positions
     for (const moved of result.movedTiles) {
@@ -121,16 +123,25 @@ export class Renderer {
       this.tileElements.set(merged.resultId, el);
     }
 
-    // Remove tiles that were in prev but not in next (accounted above)
-    const nextIds = new Set(result.nextBoardSnapshot.tiles.map((t) => t.id));
+    // Sync any remaining tiles to the next snapshot.
+    // This avoids edge cases where a merged result tile was already represented
+    // by an existing DOM element (e.g. when ids are reused by game logic).
+    const nextTilesById = new Map(result.nextBoardSnapshot.tiles.map((t) => [t.id, t]));
+
     for (const [id, el] of this.tileElements) {
-      if (!nextIds.has(id)) {
-        // moved tiles that should not appear anymore (merged sources already removed)
-        if (!mergedSet.has(id)) {
+      const next = nextTilesById.get(id);
+      if (!next) {
+        // Should not appear anymore (merged sources already removed above)
+        if (!mergedSourceIds.has(id)) {
           el.remove();
           this.tileElements.delete(id);
         }
+        continue;
       }
+
+      // Ensure value/position reflect the finalized board.
+      // (The move animation only updates position, not value.)
+      this.updateTileElement(el, next);
     }
 
     // Spawn new tile
@@ -160,6 +171,15 @@ export class Renderer {
     this.positionTile(el, tile.row, tile.col);
 
     return el;
+  }
+
+  private updateTileElement(el: HTMLElement, tile: Tile): void {
+    const { bg, fg } = getTileColor(tile.value);
+    el.style.backgroundColor = bg;
+    el.style.color = fg;
+    el.style.fontSize = getTileFontSize(tile.value);
+    el.textContent = String(tile.value);
+    this.positionTile(el, tile.row, tile.col);
   }
 
   private positionTile(el: HTMLElement, row: number, col: number): void {

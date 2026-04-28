@@ -83,8 +83,6 @@ export class Renderer {
   async animateMove(result: MoveResult): Promise<void> {
     if (!result.moved) return;
 
-    const prev = result.previousBoardSnapshot;
-    const movedSet = new Set(result.movedTiles.map((t) => t.id));
     const mergedSet = new Set(result.mergedTiles.flatMap((m) => [...m.sourceIds]));
 
     // Move tiles to new positions
@@ -142,10 +140,6 @@ export class Renderer {
         this.tileElements.set(result.spawnedTile.id, el);
       }
     }
-
-    // Suppress unused variable warning
-    void prev;
-    void movedSet;
   }
 
   /** Create a tile DOM element positioned on the grid. */

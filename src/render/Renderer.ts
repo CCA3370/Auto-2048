@@ -7,6 +7,7 @@ import type { Game } from "../game/Game";
 import type { AutoPlayer } from "../autoplay/AutoPlayer";
 
 const ANIMATION_DURATION_MS = 150;
+const ANIMATION_BUFFER_MS = 20;
 const TILE_COLORS: Record<number, { bg: string; fg: string }> = {
   2:     { bg: "#eee4da", fg: "#776e65" },
   4:     { bg: "#ede0c8", fg: "#776e65" },
@@ -46,7 +47,7 @@ export class Renderer {
     this.boardGrid = document.getElementById("board-grid")!;
     this.boardTiles = document.getElementById("board-tiles")!;
 
-    game.setAnimationDuration(ANIMATION_DURATION_MS + 20); // small buffer
+    game.setAnimationDuration(ANIMATION_DURATION_MS + ANIMATION_BUFFER_MS); // small buffer
 
     this.buildGrid();
     this.render(game.getBoardSnapshot());
@@ -83,10 +84,6 @@ export class Renderer {
   async animateMove(result: MoveResult): Promise<void> {
     if (!result.moved) return;
 
-    const mergedSourceIds = new Set(
-      result.mergedTiles.flatMap((m) => [...m.sourceIds])
-    );
-
     // Move tiles to new positions
     for (const moved of result.movedTiles) {
       const el = this.tileElements.get(moved.id);
@@ -108,14 +105,11 @@ export class Renderer {
         }
       }
 
-      // Create the merged tile element directly from MergedTileInfo,
-      // since nextBoardSnapshot is not yet populated at this point.
       const mergedTileData: Tile = {
         id: merged.resultId,
         value: merged.value,
         row: merged.row,
         col: merged.col,
-        isNew: false,
       };
       const el = this.createTileElement(mergedTileData);
       el.classList.add("tile-merged");
@@ -123,28 +117,8 @@ export class Renderer {
       this.tileElements.set(merged.resultId, el);
     }
 
-    // Sync any remaining tiles to the next snapshot.
-    // This avoids edge cases where a merged result tile was already represented
-    // by an existing DOM element (e.g. when ids are reused by game logic).
-    const nextTilesById = new Map(result.nextBoardSnapshot.tiles.map((t) => [t.id, t]));
-
-    for (const [id, el] of this.tileElements) {
-      const next = nextTilesById.get(id);
-      if (!next) {
-        // Should not appear anymore (merged sources already removed above)
-        if (!mergedSourceIds.has(id)) {
-          el.remove();
-          this.tileElements.delete(id);
-        }
-        continue;
-      }
-
-      // Ensure value/position reflect the finalized board.
-      // (The move animation only updates position, not value.)
-      this.updateTileElement(el, next);
-    }
-
     // Spawn new tile
+    await delay(ANIMATION_BUFFER_MS);
     if (result.spawnedTile) {
       const existing = this.tileElements.get(result.spawnedTile.id);
       if (!existing) {
@@ -171,15 +145,6 @@ export class Renderer {
     this.positionTile(el, tile.row, tile.col);
 
     return el;
-  }
-
-  private updateTileElement(el: HTMLElement, tile: Tile): void {
-    const { bg, fg } = getTileColor(tile.value);
-    el.style.backgroundColor = bg;
-    el.style.color = fg;
-    el.style.fontSize = getTileFontSize(tile.value);
-    el.textContent = String(tile.value);
-    this.positionTile(el, tile.row, tile.col);
   }
 
   private positionTile(el: HTMLElement, row: number, col: number): void {

@@ -106,16 +106,19 @@ export class Renderer {
         }
       }
 
-      // Create the merged tile element
-      const mergedTileData = result.nextBoardSnapshot.tiles.find(
-        (t) => t.id === merged.resultId
-      );
-      if (mergedTileData) {
-        const el = this.createTileElement(mergedTileData);
-        el.classList.add("tile-merged");
-        this.boardTiles.appendChild(el);
-        this.tileElements.set(merged.resultId, el);
-      }
+      // Create the merged tile element directly from MergedTileInfo,
+      // since nextBoardSnapshot is not yet populated at this point.
+      const mergedTileData: Tile = {
+        id: merged.resultId,
+        value: merged.value,
+        row: merged.row,
+        col: merged.col,
+        isNew: false,
+      };
+      const el = this.createTileElement(mergedTileData);
+      el.classList.add("tile-merged");
+      this.boardTiles.appendChild(el);
+      this.tileElements.set(merged.resultId, el);
     }
 
     // Remove tiles that were in prev but not in next (accounted above)

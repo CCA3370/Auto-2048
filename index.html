@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>2048 AutoPlayer</title>
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎮</text></svg>" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Header -->
+      <header class="header">
+        <div class="header-left">
+          <h1 class="title">2048</h1>
+          <p class="subtitle">Join the numbers and get to <strong>2048!</strong></p>
+        </div>
+        <div class="scores">
+          <div class="score-box" id="score-box">
+            <div class="score-label">SCORE</div>
+            <div class="score-value" id="score">0</div>
+          </div>
+          <div class="score-box" id="best-score-box">
+            <div class="score-label">BEST</div>
+            <div class="score-value" id="best-score">0</div>
+          </div>
+          <div class="score-box">
+            <div class="score-label">MAX</div>
+            <div class="score-value" id="max-tile">0</div>
+          </div>
+          <div class="score-box">
+            <div class="score-label">STEPS</div>
+            <div class="score-value" id="steps">0</div>
+          </div>
+        </div>
+      </header>
+
+      <!-- Game Controls -->
+      <div class="controls">
+        <button class="btn btn-primary" id="btn-new-game">New Game</button>
+        <button class="btn btn-secondary" id="btn-continue" disabled>Continue</button>
+      </div>
+
+      <!-- Game Board -->
+      <main class="game-wrapper">
+        <div class="board-container" id="board-container">
+          <div class="board-grid" id="board-grid"></div>
+          <div class="board-tiles" id="board-tiles"></div>
+          <!-- Overlays -->
+          <div class="overlay" id="overlay-win" aria-hidden="true">
+            <div class="overlay-content">
+              <div class="overlay-icon">🎉</div>
+              <h2>You Win!</h2>
+              <p>You reached 2048!</p>
+              <div class="overlay-buttons">
+                <button class="btn btn-primary" id="btn-overlay-continue">Keep Going</button>
+                <button class="btn btn-secondary" id="btn-overlay-new-win">New Game</button>
+              </div>
+            </div>
+          </div>
+          <div class="overlay" id="overlay-gameover" aria-hidden="true">
+            <div class="overlay-content">
+              <div class="overlay-icon">😢</div>
+              <h2>Game Over!</h2>
+              <p>No more moves available.</p>
+              <div class="overlay-buttons">
+                <button class="btn btn-primary" id="btn-overlay-new-gameover">Try Again</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      <!-- AutoPlayer Controls -->
+      <section class="autoplayer-section">
+        <h2 class="section-title">AutoPlayer</h2>
+
+        <div class="autoplayer-controls">
+          <button class="btn btn-success" id="btn-auto-start">▶ Auto Play</button>
+          <button class="btn btn-warning" id="btn-auto-pause" disabled>⏸ Pause</button>
+          <button class="btn btn-danger" id="btn-auto-stop" disabled>⏹ Stop</button>
+          <button class="btn btn-info" id="btn-auto-step">⏭ Step</button>
+        </div>
+
+        <div class="autoplayer-settings">
+          <div class="setting-group">
+            <label for="delay-slider">Delay: <span id="delay-value">300</span>ms</label>
+            <input type="range" id="delay-slider" min="0" max="2000" step="50" value="300" />
+          </div>
+          <div class="setting-group">
+            <label for="depth-slider">Max Depth: <span id="depth-value">4</span></label>
+            <input type="range" id="depth-slider" min="1" max="6" step="1" value="4" />
+          </div>
+        </div>
+
+        <div class="autoplayer-status">
+          <div class="status-grid">
+            <div class="status-item">
+              <span class="status-label">State</span>
+              <span class="status-value" id="auto-state">idle</span>
+            </div>
+            <div class="status-item">
+              <span class="status-label">Direction</span>
+              <span class="status-value" id="auto-direction">—</span>
+            </div>
+            <div class="status-item">
+              <span class="status-label">Depth</span>
+              <span class="status-value" id="auto-depth">—</span>
+            </div>
+            <div class="status-item">
+              <span class="status-label">Eval Score</span>
+              <span class="status-value" id="auto-eval">—</span>
+            </div>
+            <div class="status-item status-message">
+              <span class="status-label">Message</span>
+              <span class="status-value" id="auto-message">Ready</span>
+            </div>
+          </div>
+          <div class="evaluated-moves" id="evaluated-moves"></div>
+        </div>
+      </section>
+
+      <!-- Mobile Direction Buttons -->
+      <div class="mobile-controls" id="mobile-controls">
+        <div class="mobile-row">
+          <button class="btn-dir" data-dir="up" aria-label="Move Up">▲</button>
+        </div>
+        <div class="mobile-row">
+          <button class="btn-dir" data-dir="left" aria-label="Move Left">◀</button>
+          <button class="btn-dir" data-dir="down" aria-label="Move Down">▼</button>
+          <button class="btn-dir" data-dir="right" aria-label="Move Right">▶</button>
+        </div>
+      </div>
+
+      <!-- Hint area -->
+      <div class="hint-area" id="hint-area">
+        <span id="hint-text">Use arrow keys, WASD, swipe, or direction buttons to play.</span>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

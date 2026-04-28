@@ -1,0 +1,510 @@
+/* src/styles/style.css */
+/* Modern, warm 2048 theme. Responsive for desktop and mobile. */
+
+/* ── Reset & Base ──────────────────────────────────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --board-size: min(90vw, 480px);
+  --cell-gap: clamp(6px, 1.5vw, 12px);
+  --cell-size: calc((var(--board-size) - var(--cell-gap) * 5) / 4);
+  --border-radius: 8px;
+  --animation-duration: 150ms;
+  --bg-gradient-start: #f5e6d3;
+  --bg-gradient-end: #ede0cc;
+  --board-bg: #bbada0;
+  --cell-bg: rgba(238, 228, 218, 0.35);
+  --text-primary: #776e65;
+  --text-on-dark: #f9f6f2;
+  --accent: #f59563;
+  --accent-dark: #e07840;
+  --shadow: 0 4px 20px rgba(119, 110, 101, 0.2);
+}
+
+html, body {
+  height: 100%;
+}
+
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: linear-gradient(135deg, var(--bg-gradient-start), var(--bg-gradient-end));
+  min-height: 100vh;
+  color: var(--text-primary);
+  display: flex;
+  justify-content: center;
+  padding: 16px;
+  overflow-x: hidden;
+}
+
+#app {
+  width: 100%;
+  max-width: 520px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ── Header ────────────────────────────────────────────────────────────────── */
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.header-left {
+  flex-shrink: 0;
+}
+
+.title {
+  font-size: clamp(2rem, 8vw, 3.5rem);
+  font-weight: 900;
+  color: var(--text-primary);
+  letter-spacing: -2px;
+  line-height: 1;
+}
+
+.subtitle {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  opacity: 0.7;
+  margin-top: 4px;
+}
+
+.scores {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.score-box {
+  background: var(--board-bg);
+  border-radius: var(--border-radius);
+  padding: 8px 14px;
+  text-align: center;
+  min-width: 60px;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+}
+
+.score-label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--text-on-dark);
+  opacity: 0.8;
+  text-transform: uppercase;
+}
+
+.score-value {
+  font-size: clamp(1rem, 3vw, 1.4rem);
+  font-weight: 800;
+  color: var(--text-on-dark);
+  margin-top: 2px;
+}
+
+/* ── Controls ──────────────────────────────────────────────────────────────── */
+.controls {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 18px;
+  border: none;
+  border-radius: var(--border-radius);
+  font-size: 0.9rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: filter 0.15s, transform 0.1s;
+  white-space: nowrap;
+}
+
+.btn:active {
+  transform: scale(0.96);
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: white;
+}
+.btn-primary:hover:not(:disabled) { filter: brightness(1.1); }
+
+.btn-secondary {
+  background: var(--board-bg);
+  color: var(--text-on-dark);
+}
+.btn-secondary:hover:not(:disabled) { filter: brightness(1.1); }
+
+.btn-success {
+  background: #5cb85c;
+  color: white;
+}
+.btn-success:hover:not(:disabled) { filter: brightness(1.1); }
+
+.btn-warning {
+  background: #f0ad4e;
+  color: white;
+}
+.btn-warning:hover:not(:disabled) { filter: brightness(1.1); }
+
+.btn-danger {
+  background: #d9534f;
+  color: white;
+}
+.btn-danger:hover:not(:disabled) { filter: brightness(1.1); }
+
+.btn-info {
+  background: #5bc0de;
+  color: white;
+}
+.btn-info:hover:not(:disabled) { filter: brightness(1.1); }
+
+/* ── Game Board ────────────────────────────────────────────────────────────── */
+.game-wrapper {
+  display: flex;
+  justify-content: center;
+}
+
+.board-container {
+  position: relative;
+  width: var(--board-size);
+  height: var(--board-size);
+  background: var(--board-bg);
+  border-radius: calc(var(--border-radius) * 1.5);
+  padding: var(--cell-gap);
+  box-shadow: var(--shadow);
+  touch-action: none;
+}
+
+.board-grid {
+  position: absolute;
+  inset: var(--cell-gap);
+  display: grid;
+  grid-template-columns: repeat(4, var(--cell-size));
+  grid-template-rows: repeat(4, var(--cell-size));
+  gap: var(--cell-gap);
+}
+
+.board-cell {
+  background: var(--cell-bg);
+  border-radius: var(--border-radius);
+}
+
+.board-tiles {
+  position: absolute;
+  inset: var(--cell-gap);
+  pointer-events: none;
+}
+
+/* ── Tiles ─────────────────────────────────────────────────────────────────── */
+.tile {
+  position: absolute;
+  width: var(--cell-size);
+  height: var(--cell-size);
+  border-radius: var(--border-radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 900;
+  font-size: clamp(1.4rem, 4vw, 2.2rem);
+  line-height: 1;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+  user-select: none;
+  transition: transform var(--animation-duration) ease;
+
+  /* Position via CSS custom properties set by Renderer */
+  left: calc(var(--col) * (var(--cell-size) + var(--cell-gap)));
+  top: calc(var(--row) * (var(--cell-size) + var(--cell-gap)));
+  transform: translate(0, 0);
+  will-change: left, top;
+  transition: left var(--animation-duration) ease, top var(--animation-duration) ease;
+}
+
+/* New tile: scale in from 0 */
+.tile-new {
+  animation: tile-appear 0.18s ease forwards;
+}
+
+@keyframes tile-appear {
+  from {
+    transform: scale(0);
+    opacity: 0;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* Merged tile: pop effect */
+.tile-merged {
+  animation: tile-pop 0.2s ease forwards;
+}
+
+@keyframes tile-pop {
+  0%   { transform: scale(1); }
+  40%  { transform: scale(1.15); }
+  80%  { transform: scale(0.95); }
+  100% { transform: scale(1); }
+}
+
+/* ── Overlays ──────────────────────────────────────────────────────────────── */
+.overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: rgba(238, 228, 218, 0.88);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+}
+
+.overlay.visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.overlay-content {
+  text-align: center;
+  padding: 24px;
+}
+
+.overlay-icon {
+  font-size: 3rem;
+  margin-bottom: 8px;
+}
+
+.overlay-content h2 {
+  font-size: 2rem;
+  font-weight: 900;
+  color: var(--text-primary);
+  margin-bottom: 8px;
+}
+
+.overlay-content p {
+  font-size: 1rem;
+  color: var(--text-primary);
+  opacity: 0.8;
+  margin-bottom: 20px;
+}
+
+.overlay-buttons {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+/* ── AutoPlayer Section ────────────────────────────────────────────────────── */
+.autoplayer-section {
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: calc(var(--border-radius) * 1.5);
+  padding: 16px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+}
+
+.section-title {
+  font-size: 1rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-primary);
+  margin-bottom: 12px;
+  opacity: 0.7;
+}
+
+.autoplayer-controls {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.autoplayer-settings {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.setting-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 160px;
+}
+
+.setting-group label {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.setting-group input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.autoplayer-status {
+  background: rgba(187, 173, 160, 0.15);
+  border-radius: var(--border-radius);
+  padding: 12px;
+}
+
+.status-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.status-message {
+  grid-column: 1 / -1;
+}
+
+.status-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.status-label {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  opacity: 0.6;
+}
+
+.status-value {
+  font-size: 0.9rem;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.evaluated-moves {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.eval-move {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  background: rgba(187, 173, 160, 0.4);
+  color: var(--text-primary);
+  transition: background 0.15s;
+}
+
+.eval-invalid {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+
+.eval-best {
+  background: var(--accent);
+  color: white;
+}
+
+/* ── Mobile Direction Buttons ──────────────────────────────────────────────── */
+.mobile-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.mobile-row {
+  display: flex;
+  gap: 6px;
+}
+
+.btn-dir {
+  width: clamp(52px, 13vw, 64px);
+  height: clamp(52px, 13vw, 64px);
+  border: none;
+  border-radius: var(--border-radius);
+  background: var(--board-bg);
+  color: var(--text-on-dark);
+  font-size: clamp(1.2rem, 3vw, 1.6rem);
+  cursor: pointer;
+  transition: filter 0.15s, transform 0.1s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+  touch-action: manipulation;
+}
+
+.btn-dir:active {
+  transform: scale(0.93);
+  filter: brightness(1.15);
+}
+
+/* ── Hint Area ──────────────────────────────────────────────────────────────── */
+.hint-area {
+  text-align: center;
+  font-size: 0.8rem;
+  opacity: 0.6;
+  color: var(--text-primary);
+  padding: 4px 0 8px;
+}
+
+/* ── Score Animation ────────────────────────────────────────────────────────── */
+@keyframes score-bump {
+  0%   { transform: scale(1); }
+  50%  { transform: scale(1.2); }
+  100% { transform: scale(1); }
+}
+
+.score-value.bumped {
+  animation: score-bump 0.25s ease;
+}
+
+/* ── Responsive tweaks ──────────────────────────────────────────────────────── */
+@media (max-width: 400px) {
+  body {
+    padding: 10px 8px;
+  }
+
+  .autoplayer-controls .btn {
+    padding: 8px 12px;
+    font-size: 0.8rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tile {
+    transition: none;
+  }
+  .tile-new, .tile-merged {
+    animation: none;
+  }
+}

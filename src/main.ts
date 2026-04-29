@@ -44,11 +44,27 @@ game.onStateChange(() => {
   renderer.updateScores(snapshot, game.getSteps());
   renderer.updateAutoPlayerUI(autoPlayer);
 
+  const continueButton = document.getElementById("btn-continue") as HTMLButtonElement;
+  continueButton.disabled = !snapshot.hasWon;
+
   if (snapshot.isGameOver) {
+    renderer.hideWinOverlay();
     renderer.showGameOverOverlay();
   } else if (snapshot.hasWon) {
+    renderer.hideGameOverOverlay();
     renderer.showWinOverlay();
+  } else {
+    renderer.hideAllOverlays();
   }
+});
+
+game.onMoveEnd((result) => {
+  if (!result.moved) return;
+
+  const boardValues = result.nextBoardSnapshot.cells.map((row) =>
+    row.map((value) => value ?? 0)
+  );
+  console.log("Current board:", boardValues);
 });
 
 // ── AutoPlayer → UI ──────────────────────────────────────────────────────────

@@ -43,7 +43,7 @@ export class Game {
   private moveLock: boolean = false;
 
   private stateChangeCallbacks: Array<() => void> = [];
-  private moveStartCallbacks: Array<(result: MoveResult) => void> = [];
+  private moveStartCallbacks: Array<(result: MoveResult) => void | Promise<void>> = [];
   private moveEndCallbacks: Array<(result: MoveResult) => void> = [];
 
   constructor(size: number = 4) {
@@ -86,39 +86,37 @@ export class Game {
 
     this.moveLock = true;
 
-    const result = this.executeMove(direction, previousSnapshot);
+    try {
+      const result = this.executeMove(direction, previousSnapshot);
 
-    if (result.moved) {
-      this.steps++;
-    }
+      if (result.moved) {
+        this.steps++;
 
-    // Notify move start (for animation)
-    this.moveStartCallbacks.forEach((cb) => cb(result));
-
-    // Wait for animation to complete
-    await this.waitForAnimation(result);
-
-    // Spawn a new tile if the move was valid
-    if (result.moved) {
-      const spawned = this.spawnTile();
-      if (spawned) {
-        result.spawnedTile = { ...spawned };
+        // Spawn before animation starts so the renderer receives a complete
+        // MoveResult, then lets the tile appear after movement finishes.
+        const spawned = this.spawnTile();
+        if (spawned) {
+          result.spawnedTile = { ...spawned };
+        }
       }
+
+      // Update game-over / win state
+      this.checkWinAndGameOver();
+
+      const nextSnapshot = this.getBoardSnapshot();
+      result.nextBoardSnapshot = nextSnapshot;
+
+      // Notify move start and wait for animation to complete
+      await this.notifyMoveStart(result);
+
+      // Notify move end (for animation completion and re-render)
+      this.moveEndCallbacks.forEach((cb) => cb(result));
+      this.notifyStateChange();
+
+      return result;
+    } finally {
+      this.moveLock = false;
     }
-
-    // Update game-over / win state
-    this.checkWinAndGameOver();
-
-    const nextSnapshot = this.getBoardSnapshot();
-    result.nextBoardSnapshot = nextSnapshot;
-
-    this.moveLock = false;
-
-    // Notify move end (for animation completion and re-render)
-    this.moveEndCallbacks.forEach((cb) => cb(result));
-    this.notifyStateChange();
-
-    return result;
   }
 
   /** Returns a deep-copy snapshot of the board state. AutoPlayer only gets this. */
@@ -133,7 +131,7 @@ export class Game {
       bestScore: this.bestScore,
       maxTile: this.getMaxTile(),
       isGameOver: this.isGameOver,
-      hasWon: this.hasWon,
+      hasWon: this.hasWon && !this.continueAfterWinFlag,
     };
   }
 
@@ -161,7 +159,7 @@ export class Game {
     this.stateChangeCallbacks.push(callback);
   }
 
-  onMoveStart(callback: (result: MoveResult) => void): void {
+  onMoveStart(callback: (result: MoveResult) => void | Promise<void>): void {
     this.moveStartCallbacks.push(callback);
   }
 
@@ -258,6 +256,17 @@ export class Game {
     if (!_result.moved) return Promise.resolve();
     return new Promise((resolve) =>
       setTimeout(resolve, this.animationDurationMs)
+    );
+  }
+
+  private async notifyMoveStart(result: MoveResult): Promise<void> {
+    if (this.moveStartCallbacks.length === 0) {
+      await this.waitForAnimation(result);
+      return;
+    }
+
+    await Promise.all(
+      this.moveStartCallbacks.map((cb) => Promise.resolve(cb(result)))
     );
   }
 

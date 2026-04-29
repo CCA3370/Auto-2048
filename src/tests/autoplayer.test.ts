@@ -5,7 +5,7 @@ import {
   selectChanceCellsForSearch,
 } from "../autoplay/AutoPlayer";
 import { choosePreferredCorner, evaluate } from "../autoplay/heuristic";
-import type { BoardSnapshot, Direction } from "../types";
+import type { BoardSnapshot, Direction, MoveRequestOptions } from "../types";
 
 function makeSnapshot(cells: number[][]): BoardSnapshot {
   return {
@@ -22,6 +22,7 @@ function makeSnapshot(cells: number[][]): BoardSnapshot {
 
 class FakeGame {
   requestedMoves: Direction[] = [];
+  requestOptions: MoveRequestOptions[] = [];
 
   constructor(private readonly snapshot: BoardSnapshot) {}
 
@@ -29,8 +30,12 @@ class FakeGame {
     return this.snapshot;
   }
 
-  async requestMove(direction: Direction): Promise<unknown> {
+  async requestMove(
+    direction: Direction,
+    options: MoveRequestOptions = {}
+  ): Promise<unknown> {
     this.requestedMoves.push(direction);
+    this.requestOptions.push(options);
     return {};
   }
 }
@@ -110,5 +115,28 @@ describe("AutoPlayer evaluation", () => {
     await autoPlayer.stepOnce();
 
     expect(fakeGame.requestedMoves[0]).not.toBe("down");
+  });
+
+  it("uses Delay as the AutoPlayer move animation duration", async () => {
+    const snapshot = makeSnapshot([
+      [2, 0, 0, 0],
+      [2, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+    ]);
+    const fakeGame = new FakeGame(snapshot);
+    const autoPlayer = new AutoPlayer(fakeGame as never, {
+      thinkingStrength: 2,
+      useDynamicDepth: false,
+      maxDepth: 1,
+      delayMs: 0,
+    });
+
+    await autoPlayer.stepOnce();
+    expect(fakeGame.requestOptions[0].animationDurationMs).toBe(0);
+
+    autoPlayer.setDelay(750);
+    await autoPlayer.stepOnce();
+    expect(fakeGame.requestOptions[1].animationDurationMs).toBe(750);
   });
 });

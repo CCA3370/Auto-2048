@@ -239,7 +239,7 @@ export class AutoPlayer {
   }
 
   setDelay(ms: number): void {
-    this.options.delayMs = Math.max(0, ms);
+    this.options.delayMs = normalizeDelay(ms);
   }
 
   setThinkingStrength(value: number): void {
@@ -333,7 +333,9 @@ export class AutoPlayer {
 
     // === The ONLY write operation ===
     // AutoPlayer calls requestMove - does not touch board internals.
-    await this.game.requestMove(search.bestDirection);
+    await this.game.requestMove(search.bestDirection, {
+      animationDurationMs: this.options.delayMs,
+    });
 
     this.status.steps++;
 
@@ -613,4 +615,9 @@ function serializeBoard(board: NumBoard): string {
 
 function clampInt(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
+}
+
+function normalizeDelay(ms: number): number {
+  if (!Number.isFinite(ms)) return 0;
+  return Math.max(0, Math.round(ms));
 }

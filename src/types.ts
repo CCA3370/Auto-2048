@@ -53,6 +53,11 @@ export interface MoveResult {
   spawnedTile: Tile | null;
   previousBoardSnapshot: BoardSnapshot;
   nextBoardSnapshot: BoardSnapshot;
+  animationDurationMs: number;
+}
+
+export interface MoveRequestOptions {
+  animationDurationMs?: number;
 }
 
 export interface AutoPlayerOptions {

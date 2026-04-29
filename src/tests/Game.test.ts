@@ -45,6 +45,21 @@ describe("Game requestMove lifecycle", () => {
     expect(callbackCompleted).toBe(true);
   });
 
+  it("passes per-move animation duration to move-start callbacks", async () => {
+    const game = new Game(4);
+    const direction = firstValidMove(game);
+    let seenDuration: number | null = null;
+
+    game.onMoveStart((result) => {
+      seenDuration = result.animationDurationMs;
+    });
+
+    const result = await game.requestMove(direction, { animationDurationMs: 0 });
+
+    expect(result.animationDurationMs).toBe(0);
+    expect(seenDuration).toBe(0);
+  });
+
   it("does not expose win state after the player chooses to continue", () => {
     const game = new Game(4);
     const internals = game as unknown as { hasWon: boolean };

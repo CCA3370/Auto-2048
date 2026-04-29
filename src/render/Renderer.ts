@@ -47,7 +47,7 @@ export class Renderer {
     this.boardGrid = document.getElementById("board-grid")!;
     this.boardTiles = document.getElementById("board-tiles")!;
 
-    game.setAnimationDuration(ANIMATION_DURATION_MS + ANIMATION_BUFFER_MS); // small buffer
+    game.setAnimationDuration(ANIMATION_DURATION_MS);
 
     this.buildGrid();
     this.render(game.getBoardSnapshot());
@@ -83,8 +83,10 @@ export class Renderer {
    */
   async animateMove(result: MoveResult): Promise<void> {
     if (!result.moved) return;
+    const duration = normalizeDuration(result.animationDurationMs);
 
     // Move tiles to new positions
+    this.setAllTileTiming(duration);
     for (const moved of result.movedTiles) {
       const el = this.tileElements.get(moved.id);
       if (el) {
@@ -93,7 +95,7 @@ export class Renderer {
     }
 
     // Wait for move animation
-    await delay(ANIMATION_DURATION_MS);
+    await delay(duration);
 
     // Remove source tiles that were merged
     for (const merged of result.mergedTiles) {
@@ -112,18 +114,24 @@ export class Renderer {
         col: merged.col,
       };
       const el = this.createTileElement(mergedTileData);
-      el.classList.add("tile-merged");
+      this.setTileTiming(el, duration);
+      if (duration > 0) {
+        el.classList.add("tile-merged");
+      }
       this.boardTiles.appendChild(el);
       this.tileElements.set(merged.resultId, el);
     }
 
     // Spawn new tile
-    await delay(ANIMATION_BUFFER_MS);
+    await delay(duration > 0 ? ANIMATION_BUFFER_MS : 0);
     if (result.spawnedTile) {
       const existing = this.tileElements.get(result.spawnedTile.id);
       if (!existing) {
         const el = this.createTileElement(result.spawnedTile);
-        el.classList.add("tile-new");
+        this.setTileTiming(el, duration);
+        if (duration > 0) {
+          el.classList.add("tile-new");
+        }
         this.boardTiles.appendChild(el);
         this.tileElements.set(result.spawnedTile.id, el);
       }
@@ -150,6 +158,18 @@ export class Renderer {
   private positionTile(el: HTMLElement, row: number, col: number): void {
     el.style.setProperty("--row", String(row));
     el.style.setProperty("--col", String(col));
+  }
+
+  private setAllTileTiming(durationMs: number): void {
+    for (const el of this.tileElements.values()) {
+      this.setTileTiming(el, durationMs);
+    }
+  }
+
+  private setTileTiming(el: HTMLElement, durationMs: number): void {
+    const duration = `${durationMs}ms`;
+    el.style.transitionDuration = duration;
+    el.style.animationDuration = duration;
   }
 
   /** Update score, best score, max tile, steps. */
@@ -236,5 +256,11 @@ function setText(id: string, value: string | number): void {
 }
 
 function delay(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeDuration(ms: number): number {
+  if (!Number.isFinite(ms)) return ANIMATION_DURATION_MS;
+  return Math.max(0, Math.round(ms));
 }

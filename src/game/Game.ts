@@ -7,6 +7,7 @@ import type {
   Tile,
   BoardSnapshot,
   MoveResult,
+  MoveRequestOptions,
   MovedTileInfo,
   MergedTileInfo,
 } from "../types";
@@ -75,19 +76,29 @@ export class Game {
    * Human input and AutoPlayer both call this.
    * Resolves after both the move logic and animation are complete.
    */
-  async requestMove(direction: Direction): Promise<MoveResult> {
+  async requestMove(
+    direction: Direction,
+    options: MoveRequestOptions = {}
+  ): Promise<MoveResult> {
     // Snapshot before move
     const previousSnapshot = this.getBoardSnapshot();
+    const animationDurationMs = this.normalizeAnimationDuration(
+      options.animationDurationMs ?? this.animationDurationMs
+    );
 
     // Guard: no move if game over or lock held
     if (this.isGameOver || this.moveLock) {
-      return this.buildNoopResult(direction, previousSnapshot);
+      return this.buildNoopResult(direction, previousSnapshot, animationDurationMs);
     }
 
     this.moveLock = true;
 
     try {
-      const result = this.executeMove(direction, previousSnapshot);
+      const result = this.executeMove(
+        direction,
+        previousSnapshot,
+        animationDurationMs
+      );
 
       if (result.moved) {
         this.steps++;
@@ -177,7 +188,8 @@ export class Game {
 
   private executeMove(
     direction: Direction,
-    previousSnapshot: BoardSnapshot
+    previousSnapshot: BoardSnapshot,
+    animationDurationMs: number
   ): MoveResult {
     const applyResult = applyMove(this.board, direction, newTileId);
 
@@ -200,6 +212,7 @@ export class Game {
       spawnedTile: null,
       previousBoardSnapshot: previousSnapshot,
       nextBoardSnapshot: previousSnapshot, // updated after spawn
+      animationDurationMs,
     };
   }
 
@@ -249,14 +262,20 @@ export class Game {
   private animationDurationMs: number = 150;
 
   setAnimationDuration(ms: number): void {
-    this.animationDurationMs = ms;
+    this.animationDurationMs = this.normalizeAnimationDuration(ms);
   }
 
   private waitForAnimation(_result: MoveResult): Promise<void> {
     if (!_result.moved) return Promise.resolve();
+    if (_result.animationDurationMs <= 0) return Promise.resolve();
     return new Promise((resolve) =>
-      setTimeout(resolve, this.animationDurationMs)
+      setTimeout(resolve, _result.animationDurationMs)
     );
+  }
+
+  private normalizeAnimationDuration(ms: number): number {
+    if (!Number.isFinite(ms)) return this.animationDurationMs;
+    return Math.max(0, Math.round(ms));
   }
 
   private async notifyMoveStart(result: MoveResult): Promise<void> {
@@ -272,7 +291,8 @@ export class Game {
 
   private buildNoopResult(
     direction: Direction,
-    snapshot: BoardSnapshot
+    snapshot: BoardSnapshot,
+    animationDurationMs: number
   ): MoveResult {
     return {
       direction,
@@ -283,6 +303,7 @@ export class Game {
       spawnedTile: null,
       previousBoardSnapshot: snapshot,
       nextBoardSnapshot: snapshot,
+      animationDurationMs,
     };
   }
 

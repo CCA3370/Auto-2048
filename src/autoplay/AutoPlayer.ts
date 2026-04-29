@@ -3,7 +3,7 @@
 //
 // === CHEAT-PREVENTION BOUNDARY ===
 // The AutoPlayer ONLY interacts with the game through:
-//   1. game.getBoardSnapshot()  - read-only deep copy
+//   1. game.getBoardSnapshot() - read-only deep copy
 //   2. game.requestMove(direction) - the only write channel
 //
 // The AutoPlayer does NOT:
@@ -31,12 +31,18 @@ import {
   spawnOnBoard,
   type NumBoard,
 } from "./autoSimulator";
-import { choosePreferredCorner, evaluate, type Corner } from "./heuristic";
+import {
+  choosePreferredCorner,
+  evaluate,
+  type Corner,
+  type HeuristicPresetName,
+} from "./heuristic";
 
 const DIRECTIONS: Direction[] = ["up", "down", "left", "right"];
 const PROB_2 = 0.9;
 const PROB_4 = 0.1;
 const DEFAULT_THINKING_STRENGTH = 6;
+const DEFAULT_PRESET: HeuristicPresetName = "balanced";
 
 export interface SearchConfig {
   depth: number;
@@ -45,6 +51,32 @@ export interface SearchConfig {
   riskWeight: number;
   worstCaseWeight: number;
   cacheLimit: number;
+  heuristicPreset: HeuristicPresetName;
+}
+
+export interface SearchMetrics {
+  nodes: number;
+  cacheHits: number;
+  cacheMisses: number;
+  chanceNodes: number;
+  durationMs: number;
+  timedOut: boolean;
+}
+
+export interface SearchDecision {
+  bestDirection: Direction | null;
+  bestScore: number;
+  depth: number;
+  evaluatedMoves: EvaluatedMove[];
+  metrics: SearchMetrics;
+}
+
+export interface FindBestMoveOptions {
+  thinkingStrength?: number;
+  useDynamicDepth?: boolean;
+  maxDepth?: number;
+  timeBudgetMs?: number;
+  heuristicPreset?: HeuristicPresetName;
 }
 
 interface OrderedMove {
@@ -59,13 +91,7 @@ interface SearchContext {
   preferredCorner: Corner;
   startTime: number;
   cache: Map<string, number>;
-}
-
-interface RootSearchResult {
-  bestDirection: Direction | null;
-  bestScore: number;
-  depth: number;
-  evaluatedMoves: EvaluatedMove[];
+  metrics: SearchMetrics;
 }
 
 class SearchTimeout extends Error {
@@ -82,7 +108,8 @@ export function normalizeThinkingStrength(value: number): number {
 export function deriveSearchConfig(
   thinkingStrength: number,
   emptyCells: number,
-  useDynamicDepth: boolean = true
+  useDynamicDepth: boolean = true,
+  heuristicPreset: HeuristicPresetName = DEFAULT_PRESET
 ): SearchConfig {
   const strength = normalizeThinkingStrength(thinkingStrength);
   const empty = clampInt(emptyCells, 0, 16);
@@ -105,19 +132,20 @@ export function deriveSearchConfig(
 
   return {
     depth: clampInt(depth, 1, 7),
-    timeBudgetMs: 45 + strength * strength * 6,
-    chanceCellLimit: strength <= 2
-      ? 3
-      : strength <= 4
-        ? 4
-        : strength <= 6
-          ? 6
-          : strength <= 8
-            ? 8
-            : 16,
+    timeBudgetMs: strength >= 10 ? Number.POSITIVE_INFINITY : 45 + strength * strength * 6,
+    chanceCellLimit: strength >= 9
+      ? 16
+      : strength <= 2
+        ? 3
+        : strength <= 4
+          ? 4
+          : strength <= 6
+            ? 6
+            : 8,
     riskWeight: 0.75 + strength * 0.08,
     worstCaseWeight: strength <= 3 ? 0.02 : strength <= 6 ? 0.06 : 0.1,
     cacheLimit: 8000 + strength * 5000,
+    heuristicPreset,
   };
 }
 
@@ -132,8 +160,16 @@ export function selectChanceCellsForSearch(
       const board2 = spawnOnBoard(board, row, col, 2);
       const board4 = spawnOnBoard(board, row, col, 4);
       const score = Math.min(
-        evaluate(board2, { preferredCorner, riskWeight: config.riskWeight }),
-        evaluate(board4, { preferredCorner, riskWeight: config.riskWeight })
+        evaluate(board2, {
+          preferredCorner,
+          riskWeight: config.riskWeight,
+          preset: config.heuristicPreset,
+        }),
+        evaluate(board4, {
+          preferredCorner,
+          riskWeight: config.riskWeight,
+          preset: config.heuristicPreset,
+        })
       );
       return { row, col, score };
     })
@@ -142,6 +178,49 @@ export function selectChanceCellsForSearch(
   return ranked
     .slice(0, Math.min(config.chanceCellLimit, ranked.length))
     .map(({ row, col }) => [row, col]);
+}
+
+export function findBestMoveForBoard(
+  board: NumBoard,
+  options: FindBestMoveOptions = {}
+): SearchDecision | null {
+  const config = resolveSearchConfig(board, options);
+  const preferredCorner = choosePreferredCorner(board);
+  const context: SearchContext = {
+    config,
+    preferredCorner,
+    startTime: performance.now(),
+    cache: new Map(),
+    metrics: {
+      nodes: 0,
+      cacheHits: 0,
+      cacheMisses: 0,
+      chanceNodes: 0,
+      durationMs: 0,
+      timedOut: false,
+    },
+  };
+
+  let bestCompleted: SearchDecision | null = null;
+
+  for (let depth = 1; depth <= config.depth; depth++) {
+    try {
+      bestCompleted = evaluateRootMoves(board, depth, context);
+    } catch (error) {
+      if (error instanceof SearchTimeout) break;
+      throw error;
+    }
+  }
+
+  const decision = bestCompleted ?? evaluateImmediateMoves(board, config, preferredCorner);
+  if (!decision) return null;
+
+  decision.metrics = {
+    ...context.metrics,
+    durationMs: performance.now() - context.startTime,
+    timedOut: context.metrics.timedOut,
+  };
+  return decision;
 }
 
 export class AutoPlayer {
@@ -162,7 +241,12 @@ export class AutoPlayer {
     const thinkingStrength = normalizeThinkingStrength(
       options?.thinkingStrength ?? strengthFromDepth(options?.maxDepth ?? 4)
     );
-    const initialConfig = deriveSearchConfig(thinkingStrength, 8);
+    const initialConfig = deriveSearchConfig(
+      thinkingStrength,
+      8,
+      options?.useDynamicDepth ?? true,
+      options?.heuristicPreset ?? DEFAULT_PRESET
+    );
 
     this.options = {
       delayMs: options?.delayMs ?? 300,
@@ -170,6 +254,7 @@ export class AutoPlayer {
       useDynamicDepth: options?.useDynamicDepth ?? true,
       timeBudgetMs: options?.timeBudgetMs ?? initialConfig.timeBudgetMs,
       thinkingStrength,
+      heuristicPreset: options?.heuristicPreset ?? DEFAULT_PRESET,
     };
     this.status = this.defaultStatus();
   }
@@ -244,12 +329,21 @@ export class AutoPlayer {
 
   setThinkingStrength(value: number): void {
     const thinkingStrength = normalizeThinkingStrength(value);
-    const config = deriveSearchConfig(thinkingStrength, 8);
+    const config = deriveSearchConfig(
+      thinkingStrength,
+      8,
+      this.options.useDynamicDepth,
+      this.options.heuristicPreset
+    );
     this.options.thinkingStrength = thinkingStrength;
     this.options.maxDepth = config.depth;
     this.options.timeBudgetMs = config.timeBudgetMs;
     this.status.thinkingStrength = thinkingStrength;
     this.notifyStatusChange();
+  }
+
+  setHeuristicPreset(preset: HeuristicPresetName): void {
+    this.options.heuristicPreset = preset;
   }
 
   /** Compatibility for callers that still think in terms of max search depth. */
@@ -313,12 +407,22 @@ export class AutoPlayer {
     if (snapshot.isGameOver) return null;
 
     const board = cellsToNumBoard(snapshot.cells);
-    const config = this.selectSearchConfig(board);
-    const search = this.findBestMove(board, config);
+    const search = findBestMoveForBoard(board, {
+      thinkingStrength: this.options.thinkingStrength,
+      useDynamicDepth: this.options.useDynamicDepth,
+      maxDepth: this.options.maxDepth,
+      timeBudgetMs: this.options.timeBudgetMs,
+      heuristicPreset: this.options.heuristicPreset,
+    });
 
     this.status.evaluatedMoves = search?.evaluatedMoves ?? [];
     this.status.lastDepth = search?.depth ?? null;
     this.status.lastScore = search?.bestScore ?? null;
+    this.status.lastSearchMs = search?.metrics.durationMs ?? null;
+    this.status.searchNodes = search?.metrics.nodes ?? 0;
+    this.status.cacheHitRate = search
+      ? hitRate(search.metrics.cacheHits, search.metrics.cacheMisses)
+      : null;
 
     if (!search?.bestDirection) {
       this.status.message = "No valid moves.";
@@ -347,243 +451,6 @@ export class AutoPlayer {
     };
   }
 
-  private findBestMove(board: NumBoard, config: SearchConfig): RootSearchResult | null {
-    const preferredCorner = choosePreferredCorner(board);
-    const context: SearchContext = {
-      config,
-      preferredCorner,
-      startTime: performance.now(),
-      cache: new Map(),
-    };
-
-    let bestCompleted: RootSearchResult | null = null;
-
-    for (let depth = 1; depth <= config.depth; depth++) {
-      try {
-        bestCompleted = this.evaluateRootMoves(board, depth, context);
-      } catch (error) {
-        if (error instanceof SearchTimeout) break;
-        throw error;
-      }
-    }
-
-    return bestCompleted ?? this.evaluateImmediateMoves(board, config, preferredCorner);
-  }
-
-  private evaluateRootMoves(
-    board: NumBoard,
-    depth: number,
-    context: SearchContext
-  ): RootSearchResult {
-    const evaluated = new Map<Direction, EvaluatedMove>();
-    let bestDirection: Direction | null = null;
-    let bestScore = -Infinity;
-
-    for (const move of DIRECTIONS) {
-      evaluated.set(move, { direction: move, score: -Infinity, valid: false });
-    }
-
-    for (const move of this.orderMoves(board, context.config, context.preferredCorner)) {
-      this.checkTimeout(context);
-      const score = move.score + this.expectimax(move.board, depth, true, context);
-      evaluated.set(move.direction, { direction: move.direction, score, valid: true });
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestDirection = move.direction;
-      }
-    }
-
-    return {
-      bestDirection,
-      bestScore,
-      depth,
-      evaluatedMoves: DIRECTIONS.map((direction) => evaluated.get(direction)!),
-    };
-  }
-
-  private evaluateImmediateMoves(
-    board: NumBoard,
-    config: SearchConfig,
-    preferredCorner: Corner
-  ): RootSearchResult | null {
-    const evaluated = new Map<Direction, EvaluatedMove>();
-    let bestDirection: Direction | null = null;
-    let bestScore = -Infinity;
-
-    for (const direction of DIRECTIONS) {
-      const result = simulateMove(board, direction);
-      if (!result.moved) {
-        evaluated.set(direction, { direction, score: -Infinity, valid: false });
-        continue;
-      }
-
-      const score = result.score + evaluate(result.board, {
-        preferredCorner,
-        riskWeight: config.riskWeight,
-      });
-      evaluated.set(direction, { direction, score, valid: true });
-      if (score > bestScore) {
-        bestScore = score;
-        bestDirection = direction;
-      }
-    }
-
-    if (!bestDirection) return null;
-    return {
-      bestDirection,
-      bestScore,
-      depth: 0,
-      evaluatedMoves: DIRECTIONS.map((direction) => evaluated.get(direction)!),
-    };
-  }
-
-  /**
-   * Expectimax search.
-   * isChance = true: chance node (tile spawns).
-   * isChance = false: max node (player move).
-   */
-  private expectimax(
-    board: NumBoard,
-    depth: number,
-    isChance: boolean,
-    context: SearchContext
-  ): number {
-    this.checkTimeout(context);
-
-    const cacheKey = `${isChance ? "C" : "M"}|${depth}|${serializeBoard(board)}`;
-    const cached = context.cache.get(cacheKey);
-    if (cached !== undefined) return cached;
-
-    let value: number;
-    if (depth <= 0 || isGameOver(board)) {
-      value = this.evaluateBoard(board, context);
-    } else if (isChance) {
-      value = this.evaluateChanceNode(board, depth, context);
-    } else {
-      value = this.evaluateMaxNode(board, depth, context);
-    }
-
-    if (context.cache.size < context.config.cacheLimit) {
-      context.cache.set(cacheKey, value);
-    }
-    return value;
-  }
-
-  private evaluateMaxNode(
-    board: NumBoard,
-    depth: number,
-    context: SearchContext
-  ): number {
-    let best = -Infinity;
-
-    for (const move of this.orderMoves(board, context.config, context.preferredCorner)) {
-      this.checkTimeout(context);
-      const score = move.score + this.expectimax(move.board, depth, true, context);
-      if (score > best) best = score;
-    }
-
-    return best === -Infinity ? this.evaluateBoard(board, context) : best;
-  }
-
-  private evaluateChanceNode(
-    board: NumBoard,
-    depth: number,
-    context: SearchContext
-  ): number {
-    const cells = selectChanceCellsForSearch(
-      board,
-      context.config,
-      context.preferredCorner
-    );
-    if (cells.length === 0) return this.evaluateBoard(board, context);
-
-    let total = 0;
-    let worst = Infinity;
-
-    for (const [row, col] of cells) {
-      this.checkTimeout(context);
-
-      const score2 = this.expectimax(
-        spawnOnBoard(board, row, col, 2),
-        depth - 1,
-        false,
-        context
-      );
-      const score4 = this.expectimax(
-        spawnOnBoard(board, row, col, 4),
-        depth - 1,
-        false,
-        context
-      );
-      const expected = PROB_2 * score2 + PROB_4 * score4;
-
-      total += expected;
-      worst = Math.min(worst, expected);
-    }
-
-    const expectedAverage = total / cells.length;
-    return (
-      expectedAverage * (1 - context.config.worstCaseWeight) +
-      worst * context.config.worstCaseWeight
-    );
-  }
-
-  private orderMoves(
-    board: NumBoard,
-    config: SearchConfig,
-    preferredCorner: Corner
-  ): OrderedMove[] {
-    return DIRECTIONS.map((direction) => {
-      const result = simulateMove(board, direction);
-      if (!result.moved) return null;
-
-      const priority =
-        result.score * 4 +
-        getEmptyCells(result.board).length * 220 +
-        evaluate(result.board, { preferredCorner, riskWeight: config.riskWeight }) * 0.02;
-
-      return {
-        direction,
-        board: result.board,
-        score: result.score,
-        priority,
-      };
-    })
-      .filter((move): move is OrderedMove => move !== null)
-      .sort((a, b) => b.priority - a.priority);
-  }
-
-  private evaluateBoard(board: NumBoard, context: SearchContext): number {
-    return evaluate(board, {
-      preferredCorner: context.preferredCorner,
-      riskWeight: context.config.riskWeight,
-    });
-  }
-
-  private checkTimeout(context: SearchContext): void {
-    if (performance.now() - context.startTime > context.config.timeBudgetMs) {
-      throw new SearchTimeout();
-    }
-  }
-
-  private selectSearchConfig(board: NumBoard): SearchConfig {
-    const empty = getEmptyCells(board).length;
-    const config = deriveSearchConfig(
-      this.options.thinkingStrength,
-      empty,
-      this.options.useDynamicDepth
-    );
-
-    return {
-      ...config,
-      depth: this.options.useDynamicDepth
-        ? config.depth
-        : clampInt(this.options.maxDepth, 1, 7),
-      timeBudgetMs: this.options.timeBudgetMs,
-    };
-  }
-
   // -- Helpers ----------------------------------------------------------------
 
   private defaultStatus(): AutoPlayerStatus {
@@ -596,12 +463,255 @@ export class AutoPlayer {
       evaluatedMoves: [],
       message: "Ready",
       thinkingStrength: this.options.thinkingStrength,
+      lastSearchMs: null,
+      searchNodes: 0,
+      cacheHitRate: null,
     };
   }
 
   private notifyStatusChange(): void {
     this.onStatusChangeCallback?.();
   }
+}
+
+function resolveSearchConfig(
+  board: NumBoard,
+  options: FindBestMoveOptions
+): SearchConfig {
+  const useDynamicDepth = options.useDynamicDepth ?? true;
+  const heuristicPreset = options.heuristicPreset ?? DEFAULT_PRESET;
+  const config = deriveSearchConfig(
+    options.thinkingStrength ?? DEFAULT_THINKING_STRENGTH,
+    getEmptyCells(board).length,
+    useDynamicDepth,
+    heuristicPreset
+  );
+
+  return {
+    ...config,
+    depth: useDynamicDepth ? config.depth : clampInt(options.maxDepth ?? config.depth, 1, 7),
+    timeBudgetMs: options.timeBudgetMs ?? config.timeBudgetMs,
+  };
+}
+
+function evaluateRootMoves(
+  board: NumBoard,
+  depth: number,
+  context: SearchContext
+): SearchDecision {
+  const evaluated = new Map<Direction, EvaluatedMove>();
+  let bestDirection: Direction | null = null;
+  let bestScore = -Infinity;
+
+  for (const move of DIRECTIONS) {
+    evaluated.set(move, { direction: move, score: -Infinity, valid: false });
+  }
+
+  for (const move of orderMoves(board, context.config, context.preferredCorner)) {
+    checkTimeout(context);
+    const score = move.score + expectimax(move.board, depth, true, context);
+    evaluated.set(move.direction, { direction: move.direction, score, valid: true });
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestDirection = move.direction;
+    }
+  }
+
+  return {
+    bestDirection,
+    bestScore,
+    depth,
+    evaluatedMoves: DIRECTIONS.map((direction) => evaluated.get(direction)!),
+    metrics: { ...context.metrics },
+  };
+}
+
+function evaluateImmediateMoves(
+  board: NumBoard,
+  config: SearchConfig,
+  preferredCorner: Corner
+): SearchDecision | null {
+  const evaluated = new Map<Direction, EvaluatedMove>();
+  let bestDirection: Direction | null = null;
+  let bestScore = -Infinity;
+
+  for (const direction of DIRECTIONS) {
+    const result = simulateMove(board, direction);
+    if (!result.moved) {
+      evaluated.set(direction, { direction, score: -Infinity, valid: false });
+      continue;
+    }
+
+    const score = result.score + evaluate(result.board, {
+      preferredCorner,
+      riskWeight: config.riskWeight,
+      preset: config.heuristicPreset,
+    });
+    evaluated.set(direction, { direction, score, valid: true });
+    if (score > bestScore) {
+      bestScore = score;
+      bestDirection = direction;
+    }
+  }
+
+  if (!bestDirection) return null;
+  return {
+    bestDirection,
+    bestScore,
+    depth: 0,
+    evaluatedMoves: DIRECTIONS.map((direction) => evaluated.get(direction)!),
+    metrics: {
+      nodes: 0,
+      cacheHits: 0,
+      cacheMisses: 0,
+      chanceNodes: 0,
+      durationMs: 0,
+      timedOut: false,
+    },
+  };
+}
+
+function expectimax(
+  board: NumBoard,
+  depth: number,
+  isChance: boolean,
+  context: SearchContext
+): number {
+  checkTimeout(context);
+  context.metrics.nodes++;
+
+  const cacheKey = `${isChance ? "C" : "M"}|${depth}|${serializeBoard(board)}`;
+  const cached = context.cache.get(cacheKey);
+  if (cached !== undefined) {
+    context.metrics.cacheHits++;
+    return cached;
+  }
+  context.metrics.cacheMisses++;
+
+  let value: number;
+  if (depth <= 0 || isGameOver(board)) {
+    value = evaluateBoard(board, context);
+  } else if (isChance) {
+    value = evaluateChanceNode(board, depth, context);
+  } else {
+    value = evaluateMaxNode(board, depth, context);
+  }
+
+  if (context.cache.size < context.config.cacheLimit) {
+    context.cache.set(cacheKey, value);
+  }
+  return value;
+}
+
+function evaluateMaxNode(
+  board: NumBoard,
+  depth: number,
+  context: SearchContext
+): number {
+  let best = -Infinity;
+
+  for (const move of orderMoves(board, context.config, context.preferredCorner)) {
+    checkTimeout(context);
+    const score = move.score + expectimax(move.board, depth, true, context);
+    if (score > best) best = score;
+  }
+
+  return best === -Infinity ? evaluateBoard(board, context) : best;
+}
+
+function evaluateChanceNode(
+  board: NumBoard,
+  depth: number,
+  context: SearchContext
+): number {
+  context.metrics.chanceNodes++;
+  const cells = selectChanceCellsForSearch(
+    board,
+    context.config,
+    context.preferredCorner
+  );
+  if (cells.length === 0) return evaluateBoard(board, context);
+
+  let total = 0;
+  let worst = Infinity;
+
+  for (const [row, col] of cells) {
+    checkTimeout(context);
+
+    const score2 = expectimax(
+      spawnOnBoard(board, row, col, 2),
+      depth - 1,
+      false,
+      context
+    );
+    const score4 = expectimax(
+      spawnOnBoard(board, row, col, 4),
+      depth - 1,
+      false,
+      context
+    );
+    const expected = PROB_2 * score2 + PROB_4 * score4;
+
+    total += expected;
+    worst = Math.min(worst, expected);
+  }
+
+  const expectedAverage = total / cells.length;
+  return (
+    expectedAverage * (1 - context.config.worstCaseWeight) +
+    worst * context.config.worstCaseWeight
+  );
+}
+
+function orderMoves(
+  board: NumBoard,
+  config: SearchConfig,
+  preferredCorner: Corner
+): OrderedMove[] {
+  return DIRECTIONS.map((direction) => {
+    const result = simulateMove(board, direction);
+    if (!result.moved) return null;
+
+    const priority =
+      result.score * 4 +
+      getEmptyCells(result.board).length * 220 +
+      evaluate(result.board, {
+        preferredCorner,
+        riskWeight: config.riskWeight,
+        preset: config.heuristicPreset,
+      }) * 0.02;
+
+    return {
+      direction,
+      board: result.board,
+      score: result.score,
+      priority,
+    };
+  })
+    .filter((move): move is OrderedMove => move !== null)
+    .sort((a, b) => b.priority - a.priority);
+}
+
+function evaluateBoard(board: NumBoard, context: SearchContext): number {
+  return evaluate(board, {
+    preferredCorner: context.preferredCorner,
+    riskWeight: context.config.riskWeight,
+    preset: context.config.heuristicPreset,
+  });
+}
+
+function checkTimeout(context: SearchContext): void {
+  if (!Number.isFinite(context.config.timeBudgetMs)) return;
+  if (performance.now() - context.startTime > context.config.timeBudgetMs) {
+    context.metrics.timedOut = true;
+    throw new SearchTimeout();
+  }
+}
+
+function hitRate(cacheHits: number, cacheMisses: number): number {
+  const total = cacheHits + cacheMisses;
+  return total === 0 ? 0 : cacheHits / total;
 }
 
 function strengthFromDepth(depth: number): number {

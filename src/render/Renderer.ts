@@ -219,6 +219,18 @@ export class Renderer {
       "auto-eval",
       status.lastScore !== null ? Math.round(status.lastScore).toLocaleString() : "—"
     );
+    setText(
+      "auto-search",
+      status.lastSearchMs !== null ? `${Math.round(status.lastSearchMs)}ms` : "—"
+    );
+    setText(
+      "auto-nodes",
+      status.searchNodes > 0 ? status.searchNodes.toLocaleString() : "—"
+    );
+    setText(
+      "auto-cache",
+      status.cacheHitRate !== null ? `${Math.round(status.cacheHitRate * 100)}%` : "—"
+    );
     setText("auto-message", status.message);
 
     // Evaluated moves breakdown

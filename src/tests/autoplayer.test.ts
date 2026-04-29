@@ -2,9 +2,14 @@ import { describe, it, expect } from "vitest";
 import {
   AutoPlayer,
   deriveSearchConfig,
+  findBestMoveForBoard,
   selectChanceCellsForSearch,
 } from "../autoplay/AutoPlayer";
-import { choosePreferredCorner, evaluate } from "../autoplay/heuristic";
+import {
+  HEURISTIC_PRESETS,
+  choosePreferredCorner,
+  evaluate,
+} from "../autoplay/heuristic";
 import type { BoardSnapshot, Direction, MoveRequestOptions } from "../types";
 
 function makeSnapshot(cells: number[][]): BoardSnapshot {
@@ -73,9 +78,29 @@ describe("AutoPlayer search configuration", () => {
       config.chanceCellLimit
     );
   });
+
+  it("uses full chance expansion at high strength", () => {
+    const board = [
+      [64, 32, 16, 8],
+      [4, 2, 4, 2],
+      [0, 0, 8, 4],
+      [0, 2, 0, 0],
+    ];
+    const config = deriveSearchConfig(10, 6);
+
+    expect(selectChanceCellsForSearch(board, config).length).toBe(5);
+  });
 });
 
 describe("AutoPlayer evaluation", () => {
+  it("provides multiple heuristic presets for benchmark comparison", () => {
+    expect(Object.keys(HEURISTIC_PRESETS)).toEqual([
+      "balanced",
+      "high-score",
+      "survival",
+    ]);
+  });
+
   it("rewards keeping the max tile in the preferred corner", () => {
     const stable = [
       [1024, 512, 256, 128],
@@ -115,6 +140,25 @@ describe("AutoPlayer evaluation", () => {
     await autoPlayer.stepOnce();
 
     expect(fakeGame.requestedMoves[0]).not.toBe("down");
+  });
+
+  it("returns search metrics for pure board decisions", () => {
+    const board = [
+      [2, 2, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+    ];
+
+    const decision = findBestMoveForBoard(board, {
+      thinkingStrength: 3,
+      useDynamicDepth: false,
+      maxDepth: 1,
+    });
+
+    expect(decision?.bestDirection).toBe("left");
+    expect(decision?.metrics.nodes).toBeGreaterThan(0);
+    expect(decision?.metrics.durationMs).toBeGreaterThanOrEqual(0);
   });
 
   it("uses Delay as the AutoPlayer move animation duration", async () => {

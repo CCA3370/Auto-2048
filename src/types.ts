@@ -1,6 +1,8 @@
 // src/types.ts
 // Central type definitions for the 2048 AutoPlayer project.
 
+import type { HeuristicPresetName } from "./autoplay/heuristic";
+
 export type Direction = "up" | "down" | "left" | "right";
 
 export interface Tile {
@@ -66,6 +68,7 @@ export interface AutoPlayerOptions {
   useDynamicDepth: boolean;
   timeBudgetMs: number;
   thinkingStrength: number;
+  heuristicPreset: HeuristicPresetName;
 }
 
 export interface EvaluatedMove {
@@ -90,4 +93,7 @@ export interface AutoPlayerStatus {
   evaluatedMoves: EvaluatedMove[];
   message: string;
   thinkingStrength: number;
+  lastSearchMs: number | null;
+  searchNodes: number;
+  cacheHitRate: number | null;
 }

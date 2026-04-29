@@ -60,6 +60,7 @@ export interface AutoPlayerOptions {
   maxDepth: number;
   useDynamicDepth: boolean;
   timeBudgetMs: number;
+  thinkingStrength: number;
 }
 
 export interface EvaluatedMove {
@@ -83,4 +84,5 @@ export interface AutoPlayerStatus {
   steps: number;
   evaluatedMoves: EvaluatedMove[];
   message: string;
+  thinkingStrength: number;
 }

@@ -1,10 +1,10 @@
 // src/autoplay/AutoPlayer.ts
-// AutoPlayer using Expectimax algorithm.
+// AutoPlayer using a strength-tuned Expectimax search.
 //
 // === CHEAT-PREVENTION BOUNDARY ===
 // The AutoPlayer ONLY interacts with the game through:
-//   1. game.getBoardSnapshot()  — read-only deep copy
-//   2. game.requestMove(direction) — the only write channel
+//   1. game.getBoardSnapshot()  - read-only deep copy
+//   2. game.requestMove(direction) - the only write channel
 //
 // The AutoPlayer does NOT:
 //   - Access game.board (private)
@@ -28,22 +28,128 @@ import {
   simulateMove,
   getEmptyCells,
   isGameOver,
+  spawnOnBoard,
   type NumBoard,
 } from "./autoSimulator";
-import { evaluate } from "./heuristic";
+import { choosePreferredCorner, evaluate, type Corner } from "./heuristic";
 
 const DIRECTIONS: Direction[] = ["up", "down", "left", "right"];
-
-// Probability of spawning 2 vs 4
 const PROB_2 = 0.9;
 const PROB_4 = 0.1;
+const DEFAULT_THINKING_STRENGTH = 6;
+
+export interface SearchConfig {
+  depth: number;
+  timeBudgetMs: number;
+  chanceCellLimit: number;
+  riskWeight: number;
+  worstCaseWeight: number;
+  cacheLimit: number;
+}
+
+interface OrderedMove {
+  direction: Direction;
+  board: NumBoard;
+  score: number;
+  priority: number;
+}
+
+interface SearchContext {
+  config: SearchConfig;
+  preferredCorner: Corner;
+  startTime: number;
+  cache: Map<string, number>;
+}
+
+interface RootSearchResult {
+  bestDirection: Direction | null;
+  bestScore: number;
+  depth: number;
+  evaluatedMoves: EvaluatedMove[];
+}
+
+class SearchTimeout extends Error {
+  constructor() {
+    super("AutoPlayer search timed out");
+  }
+}
+
+export function normalizeThinkingStrength(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_THINKING_STRENGTH;
+  return clampInt(Math.round(value), 1, 10);
+}
+
+export function deriveSearchConfig(
+  thinkingStrength: number,
+  emptyCells: number,
+  useDynamicDepth: boolean = true
+): SearchConfig {
+  const strength = normalizeThinkingStrength(thinkingStrength);
+  const empty = clampInt(emptyCells, 0, 16);
+
+  let depth = strength <= 2
+    ? 1
+    : strength <= 4
+      ? 2
+      : strength <= 6
+        ? 3
+        : strength <= 8
+          ? 4
+          : 5;
+
+  if (useDynamicDepth) {
+    if (empty <= 2) depth += 2;
+    else if (empty <= 4) depth += 1;
+    else if (empty >= 10) depth -= 1;
+  }
+
+  return {
+    depth: clampInt(depth, 1, 7),
+    timeBudgetMs: 45 + strength * strength * 6,
+    chanceCellLimit: strength <= 2
+      ? 3
+      : strength <= 4
+        ? 4
+        : strength <= 6
+          ? 6
+          : strength <= 8
+            ? 8
+            : 16,
+    riskWeight: 0.75 + strength * 0.08,
+    worstCaseWeight: strength <= 3 ? 0.02 : strength <= 6 ? 0.06 : 0.1,
+    cacheLimit: 8000 + strength * 5000,
+  };
+}
+
+export function selectChanceCellsForSearch(
+  board: NumBoard,
+  config: SearchConfig,
+  preferredCorner: Corner = choosePreferredCorner(board)
+): Array<[number, number]> {
+  const empty = getEmptyCells(board);
+  const ranked = empty
+    .map(([row, col]) => {
+      const board2 = spawnOnBoard(board, row, col, 2);
+      const board4 = spawnOnBoard(board, row, col, 4);
+      const score = Math.min(
+        evaluate(board2, { preferredCorner, riskWeight: config.riskWeight }),
+        evaluate(board4, { preferredCorner, riskWeight: config.riskWeight })
+      );
+      return { row, col, score };
+    })
+    .sort((a, b) => a.score - b.score || a.row - b.row || a.col - b.col);
+
+  return ranked
+    .slice(0, Math.min(config.chanceCellLimit, ranked.length))
+    .map(({ row, col }) => [row, col]);
+}
 
 export class AutoPlayer {
   private readonly game: Game;
   private options: AutoPlayerOptions;
   private status: AutoPlayerStatus;
 
-  /** Running loop handle — null when stopped. */
+  /** Running loop handle - null when stopped. */
   private loopHandle: ReturnType<typeof setTimeout> | null = null;
   private running: boolean = false;
   private paused: boolean = false;
@@ -52,16 +158,23 @@ export class AutoPlayer {
 
   constructor(game: Game, options?: Partial<AutoPlayerOptions>) {
     this.game = game;
+
+    const thinkingStrength = normalizeThinkingStrength(
+      options?.thinkingStrength ?? strengthFromDepth(options?.maxDepth ?? 4)
+    );
+    const initialConfig = deriveSearchConfig(thinkingStrength, 8);
+
     this.options = {
       delayMs: options?.delayMs ?? 300,
-      maxDepth: options?.maxDepth ?? 4,
+      maxDepth: options?.maxDepth ?? initialConfig.depth,
       useDynamicDepth: options?.useDynamicDepth ?? true,
-      timeBudgetMs: options?.timeBudgetMs ?? 200,
+      timeBudgetMs: options?.timeBudgetMs ?? initialConfig.timeBudgetMs,
+      thinkingStrength,
     };
     this.status = this.defaultStatus();
   }
 
-  // ── Public API ──────────────────────────────────────────────────────────────
+  // -- Public API -------------------------------------------------------------
 
   start(): void {
     if (this.running && !this.paused) return;
@@ -76,7 +189,7 @@ export class AutoPlayer {
     this.running = true;
     this.paused = false;
     this.status.state = "running";
-    this.status.message = "AutoPlayer running…";
+    this.status.message = "AutoPlayer running...";
     this.notifyStatusChange();
 
     this.scheduleNextStep();
@@ -110,7 +223,7 @@ export class AutoPlayer {
     }
 
     this.status.state = "thinking";
-    this.status.message = "Thinking…";
+    this.status.message = "Thinking...";
     this.notifyStatusChange();
 
     const result = await this.computeAndMove();
@@ -126,11 +239,24 @@ export class AutoPlayer {
   }
 
   setDelay(ms: number): void {
-    this.options.delayMs = ms;
+    this.options.delayMs = Math.max(0, ms);
   }
 
+  setThinkingStrength(value: number): void {
+    const thinkingStrength = normalizeThinkingStrength(value);
+    const config = deriveSearchConfig(thinkingStrength, 8);
+    this.options.thinkingStrength = thinkingStrength;
+    this.options.maxDepth = config.depth;
+    this.options.timeBudgetMs = config.timeBudgetMs;
+    this.status.thinkingStrength = thinkingStrength;
+    this.notifyStatusChange();
+  }
+
+  /** Compatibility for callers that still think in terms of max search depth. */
   setMaxDepth(depth: number): void {
-    this.options.maxDepth = depth;
+    const normalizedDepth = clampInt(Math.round(depth), 1, 7);
+    this.options.maxDepth = normalizedDepth;
+    this.setThinkingStrength(strengthFromDepth(normalizedDepth));
   }
 
   isRunning(): boolean {
@@ -138,14 +264,17 @@ export class AutoPlayer {
   }
 
   getStatus(): AutoPlayerStatus {
-    return { ...this.status };
+    return {
+      ...this.status,
+      evaluatedMoves: this.status.evaluatedMoves.map((move) => ({ ...move })),
+    };
   }
 
   onStatusChange(cb: () => void): void {
     this.onStatusChangeCallback = cb;
   }
 
-  // ── Internal loop ───────────────────────────────────────────────────────────
+  // -- Internal loop ----------------------------------------------------------
 
   private scheduleNextStep(): void {
     if (!this.running || this.paused) return;
@@ -156,7 +285,7 @@ export class AutoPlayer {
       const snapshot = this.game.getBoardSnapshot();
       if (snapshot.isGameOver) {
         this.stop();
-        this.status.message = "Game over — AutoPlayer stopped.";
+        this.status.message = "Game over - AutoPlayer stopped.";
         this.notifyStatusChange();
         return;
       }
@@ -184,69 +313,128 @@ export class AutoPlayer {
     if (snapshot.isGameOver) return null;
 
     const board = cellsToNumBoard(snapshot.cells);
-    const depth = this.selectDepth(board);
+    const config = this.selectSearchConfig(board);
+    const search = this.findBestMove(board, config);
 
-    const startTime = performance.now();
-    const evaluatedMoves: EvaluatedMove[] = [];
-    let bestDirection: Direction | null = null;
-    let bestScore = -Infinity;
+    this.status.evaluatedMoves = search?.evaluatedMoves ?? [];
+    this.status.lastDepth = search?.depth ?? null;
+    this.status.lastScore = search?.bestScore ?? null;
 
-    for (const dir of DIRECTIONS) {
-      const { board: newBoard, moved } = simulateMove(board, dir);
-      if (!moved) {
-        evaluatedMoves.push({ direction: dir, score: -Infinity, valid: false });
-        continue;
-      }
-
-      const score = this.expectimax(
-        newBoard,
-        depth - 1,
-        false,
-        startTime,
-        this.options.timeBudgetMs
-      );
-
-      evaluatedMoves.push({ direction: dir, score, valid: true });
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestDirection = dir;
-      }
-    }
-
-    this.status.evaluatedMoves = evaluatedMoves;
-    this.status.lastDepth = depth;
-    this.status.lastScore = bestScore;
-
-    if (!bestDirection) {
-      // No valid moves — game should be over
+    if (!search?.bestDirection) {
       this.status.message = "No valid moves.";
       this.notifyStatusChange();
       return null;
     }
 
     this.status.state = "running";
-    this.status.lastDirection = bestDirection;
-    this.status.message = `Moving: ${bestDirection}`;
+    this.status.lastDirection = search.bestDirection;
+    this.status.message = `Moving: ${search.bestDirection}`;
     this.notifyStatusChange();
 
     // === The ONLY write operation ===
-    // AutoPlayer calls requestMove — does not touch board internals.
-    await this.game.requestMove(bestDirection);
+    // AutoPlayer calls requestMove - does not touch board internals.
+    await this.game.requestMove(search.bestDirection);
 
     this.status.steps++;
 
-    const result: AutoPlayerResult = {
-      direction: bestDirection,
-      score: bestScore,
-      depth,
-      evaluatedMoves,
+    return {
+      direction: search.bestDirection,
+      score: search.bestScore,
+      depth: search.depth,
+      evaluatedMoves: search.evaluatedMoves,
     };
-
-    return result;
   }
 
-  // ── Expectimax algorithm ────────────────────────────────────────────────────
+  private findBestMove(board: NumBoard, config: SearchConfig): RootSearchResult | null {
+    const preferredCorner = choosePreferredCorner(board);
+    const context: SearchContext = {
+      config,
+      preferredCorner,
+      startTime: performance.now(),
+      cache: new Map(),
+    };
+
+    let bestCompleted: RootSearchResult | null = null;
+
+    for (let depth = 1; depth <= config.depth; depth++) {
+      try {
+        bestCompleted = this.evaluateRootMoves(board, depth, context);
+      } catch (error) {
+        if (error instanceof SearchTimeout) break;
+        throw error;
+      }
+    }
+
+    return bestCompleted ?? this.evaluateImmediateMoves(board, config, preferredCorner);
+  }
+
+  private evaluateRootMoves(
+    board: NumBoard,
+    depth: number,
+    context: SearchContext
+  ): RootSearchResult {
+    const evaluated = new Map<Direction, EvaluatedMove>();
+    let bestDirection: Direction | null = null;
+    let bestScore = -Infinity;
+
+    for (const move of DIRECTIONS) {
+      evaluated.set(move, { direction: move, score: -Infinity, valid: false });
+    }
+
+    for (const move of this.orderMoves(board, context.config, context.preferredCorner)) {
+      this.checkTimeout(context);
+      const score = move.score + this.expectimax(move.board, depth, true, context);
+      evaluated.set(move.direction, { direction: move.direction, score, valid: true });
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestDirection = move.direction;
+      }
+    }
+
+    return {
+      bestDirection,
+      bestScore,
+      depth,
+      evaluatedMoves: DIRECTIONS.map((direction) => evaluated.get(direction)!),
+    };
+  }
+
+  private evaluateImmediateMoves(
+    board: NumBoard,
+    config: SearchConfig,
+    preferredCorner: Corner
+  ): RootSearchResult | null {
+    const evaluated = new Map<Direction, EvaluatedMove>();
+    let bestDirection: Direction | null = null;
+    let bestScore = -Infinity;
+
+    for (const direction of DIRECTIONS) {
+      const result = simulateMove(board, direction);
+      if (!result.moved) {
+        evaluated.set(direction, { direction, score: -Infinity, valid: false });
+        continue;
+      }
+
+      const score = result.score + evaluate(result.board, {
+        preferredCorner,
+        riskWeight: config.riskWeight,
+      });
+      evaluated.set(direction, { direction, score, valid: true });
+      if (score > bestScore) {
+        bestScore = score;
+        bestDirection = direction;
+      }
+    }
+
+    if (!bestDirection) return null;
+    return {
+      bestDirection,
+      bestScore,
+      depth: 0,
+      evaluatedMoves: DIRECTIONS.map((direction) => evaluated.get(direction)!),
+    };
+  }
 
   /**
    * Expectimax search.
@@ -257,100 +445,144 @@ export class AutoPlayer {
     board: NumBoard,
     depth: number,
     isChance: boolean,
-    startTime: number,
-    timeBudget: number
+    context: SearchContext
   ): number {
-    // Timeout guard
-    if (performance.now() - startTime > timeBudget) {
-      return evaluate(board);
-    }
+    this.checkTimeout(context);
 
-    if (depth === 0 || isGameOver(board)) {
-      return evaluate(board);
-    }
+    const cacheKey = `${isChance ? "C" : "M"}|${depth}|${serializeBoard(board)}`;
+    const cached = context.cache.get(cacheKey);
+    if (cached !== undefined) return cached;
 
-    if (!isChance) {
-      // Max node — choose best direction
-      let best = -Infinity;
-
-      for (const dir of DIRECTIONS) {
-        const { board: newBoard, moved } = simulateMove(board, dir);
-        if (!moved) continue;
-
-        const score = this.expectimax(
-          newBoard,
-          depth - 1,
-          true,
-          startTime,
-          timeBudget
-        );
-        if (score > best) best = score;
-      }
-
-      return best === -Infinity ? evaluate(board) : best;
+    let value: number;
+    if (depth <= 0 || isGameOver(board)) {
+      value = this.evaluateBoard(board, context);
+    } else if (isChance) {
+      value = this.evaluateChanceNode(board, depth, context);
     } else {
-      // Chance node — weighted average over all possible tile spawns
-      const empty = getEmptyCells(board);
-      if (empty.length === 0) return evaluate(board);
+      value = this.evaluateMaxNode(board, depth, context);
+    }
 
-      // Limit chance node branching for performance
-      const sampledCells = empty.length > 6
-        ? sampleCells(empty, 6)
-        : empty;
+    if (context.cache.size < context.config.cacheLimit) {
+      context.cache.set(cacheKey, value);
+    }
+    return value;
+  }
 
-      let total = 0;
+  private evaluateMaxNode(
+    board: NumBoard,
+    depth: number,
+    context: SearchContext
+  ): number {
+    let best = -Infinity;
 
-      for (const [r, c] of sampledCells) {
-        // Spawn 2
-        const board2 = board.map((row) => [...row]);
-        board2[r][c] = 2;
-        const score2 = this.expectimax(
-          board2,
-          depth - 1,
-          false,
-          startTime,
-          timeBudget
-        );
+    for (const move of this.orderMoves(board, context.config, context.preferredCorner)) {
+      this.checkTimeout(context);
+      const score = move.score + this.expectimax(move.board, depth, true, context);
+      if (score > best) best = score;
+    }
 
-        // Spawn 4
-        const board4 = board.map((row) => [...row]);
-        board4[r][c] = 4;
-        const score4 = this.expectimax(
-          board4,
-          depth - 1,
-          false,
-          startTime,
-          timeBudget
-        );
+    return best === -Infinity ? this.evaluateBoard(board, context) : best;
+  }
 
-        total += PROB_2 * score2 + PROB_4 * score4;
-      }
+  private evaluateChanceNode(
+    board: NumBoard,
+    depth: number,
+    context: SearchContext
+  ): number {
+    const cells = selectChanceCellsForSearch(
+      board,
+      context.config,
+      context.preferredCorner
+    );
+    if (cells.length === 0) return this.evaluateBoard(board, context);
 
-      return total / sampledCells.length;
+    let total = 0;
+    let worst = Infinity;
+
+    for (const [row, col] of cells) {
+      this.checkTimeout(context);
+
+      const score2 = this.expectimax(
+        spawnOnBoard(board, row, col, 2),
+        depth - 1,
+        false,
+        context
+      );
+      const score4 = this.expectimax(
+        spawnOnBoard(board, row, col, 4),
+        depth - 1,
+        false,
+        context
+      );
+      const expected = PROB_2 * score2 + PROB_4 * score4;
+
+      total += expected;
+      worst = Math.min(worst, expected);
+    }
+
+    const expectedAverage = total / cells.length;
+    return (
+      expectedAverage * (1 - context.config.worstCaseWeight) +
+      worst * context.config.worstCaseWeight
+    );
+  }
+
+  private orderMoves(
+    board: NumBoard,
+    config: SearchConfig,
+    preferredCorner: Corner
+  ): OrderedMove[] {
+    return DIRECTIONS.map((direction) => {
+      const result = simulateMove(board, direction);
+      if (!result.moved) return null;
+
+      const priority =
+        result.score * 4 +
+        getEmptyCells(result.board).length * 220 +
+        evaluate(result.board, { preferredCorner, riskWeight: config.riskWeight }) * 0.02;
+
+      return {
+        direction,
+        board: result.board,
+        score: result.score,
+        priority,
+      };
+    })
+      .filter((move): move is OrderedMove => move !== null)
+      .sort((a, b) => b.priority - a.priority);
+  }
+
+  private evaluateBoard(board: NumBoard, context: SearchContext): number {
+    return evaluate(board, {
+      preferredCorner: context.preferredCorner,
+      riskWeight: context.config.riskWeight,
+    });
+  }
+
+  private checkTimeout(context: SearchContext): void {
+    if (performance.now() - context.startTime > context.config.timeBudgetMs) {
+      throw new SearchTimeout();
     }
   }
 
-  // ── Dynamic depth selection ─────────────────────────────────────────────────
+  private selectSearchConfig(board: NumBoard): SearchConfig {
+    const empty = getEmptyCells(board).length;
+    const config = deriveSearchConfig(
+      this.options.thinkingStrength,
+      empty,
+      this.options.useDynamicDepth
+    );
 
-  private selectDepth(board: NumBoard): number {
-    if (!this.options.useDynamicDepth) return this.options.maxDepth;
-
-    let empty = 0;
-    for (const row of board) {
-      for (const v of row) {
-        if (v === 0) empty++;
-      }
-    }
-
-    // Fewer empty cells → deeper search (board is tight, critical decisions)
-    if (empty <= 2) return Math.min(this.options.maxDepth + 2, 6);
-    if (empty <= 4) return Math.min(this.options.maxDepth + 1, 5);
-    if (empty >= 10) return Math.max(this.options.maxDepth - 1, 2);
-
-    return this.options.maxDepth;
+    return {
+      ...config,
+      depth: this.options.useDynamicDepth
+        ? config.depth
+        : clampInt(this.options.maxDepth, 1, 7),
+      timeBudgetMs: this.options.timeBudgetMs,
+    };
   }
 
-  // ── Helpers ─────────────────────────────────────────────────────────────────
+  // -- Helpers ----------------------------------------------------------------
 
   private defaultStatus(): AutoPlayerStatus {
     return {
@@ -361,6 +593,7 @@ export class AutoPlayer {
       steps: 0,
       evaluatedMoves: [],
       message: "Ready",
+      thinkingStrength: this.options.thinkingStrength,
     };
   }
 
@@ -369,16 +602,15 @@ export class AutoPlayer {
   }
 }
 
-/** Randomly sample `n` cells from an array (without replacement). */
-function sampleCells(
-  cells: Array<[number, number]>,
-  n: number
-): Array<[number, number]> {
-  const copy = [...cells];
-  const result: Array<[number, number]> = [];
-  for (let i = 0; i < n && copy.length > 0; i++) {
-    const idx = Math.floor(Math.random() * copy.length);
-    result.push(copy.splice(idx, 1)[0]);
-  }
-  return result;
+function strengthFromDepth(depth: number): number {
+  const normalizedDepth = clampInt(Math.round(depth), 1, 7);
+  return clampInt(Math.round(((normalizedDepth - 1) / 6) * 9 + 1), 1, 10);
+}
+
+function serializeBoard(board: NumBoard): string {
+  return board.map((row) => row.join(",")).join(";");
+}
+
+function clampInt(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }

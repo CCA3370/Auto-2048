@@ -1,110 +1,138 @@
 // src/autoplay/heuristic.ts
-// Comprehensive heuristic evaluation for the Expectimax AutoPlayer.
-// Each component is individually commented for clarity.
+// Heuristic evaluation for the Expectimax AutoPlayer.
 
 import type { NumBoard } from "./autoSimulator";
 
-// ── Snake-pattern weight matrix ──────────────────────────────────────────────
-// Rewards keeping the largest tiles in a snake pattern (corner strategy).
-// Higher values in top-left, winding down.
-const SNAKE_WEIGHTS: number[][] = [
-  [65536, 32768, 16384, 8192],
-  [  512,  1024,  2048, 4096],
-  [  256,   128,    64,   32],
-  [    2,     4,     8,   16],
+export type Corner = "top-left" | "top-right" | "bottom-left" | "bottom-right";
+
+export interface EvaluationOptions {
+  preferredCorner?: Corner;
+  riskWeight?: number;
+}
+
+interface SnakeVariant {
+  corner: Corner;
+  weights: number[][];
+}
+
+// Log-scaled snake weights. The largest tile should stay in a corner and the
+// surrounding values should descend along a stable snake path.
+const BASE_SNAKE_WEIGHTS: number[][] = [
+  [15, 14, 13, 12],
+  [8, 9, 10, 11],
+  [7, 6, 5, 4],
+  [0, 1, 2, 3],
 ];
 
-// Rotated variants of the snake matrix for all 4 corners
-const SNAKE_VARIANTS: number[][][] = [];
-function buildSnakeVariants(): void {
+const SNAKE_VARIANTS: SnakeVariant[] = buildSnakeVariants();
+
+function buildSnakeVariants(): SnakeVariant[] {
   function rotateMatrix(m: number[][]): number[][] {
     const n = m.length;
     return Array.from({ length: n }, (_, r) =>
       Array.from({ length: n }, (_, c) => m[n - 1 - c][r])
     );
   }
+
   function mirrorMatrix(m: number[][]): number[][] {
     return m.map((row) => [...row].reverse());
   }
 
-  const variants = new Set<string>();
-  let current = SNAKE_WEIGHTS;
+  const variants: SnakeVariant[] = [];
+  const seen = new Set<string>();
+  let current = BASE_SNAKE_WEIGHTS;
+
   for (let i = 0; i < 4; i++) {
-    const key = JSON.stringify(current);
-    if (!variants.has(key)) {
-      variants.add(key);
-      SNAKE_VARIANTS.push(current);
-    }
-    const mirrored = mirrorMatrix(current);
-    const mirrorKey = JSON.stringify(mirrored);
-    if (!variants.has(mirrorKey)) {
-      variants.add(mirrorKey);
-      SNAKE_VARIANTS.push(mirrored);
+    for (const weights of [current, mirrorMatrix(current)]) {
+      const key = JSON.stringify(weights);
+      if (!seen.has(key)) {
+        seen.add(key);
+        variants.push({ weights, corner: strongestWeightCorner(weights) });
+      }
     }
     current = rotateMatrix(current);
   }
-}
-buildSnakeVariants();
 
-// ── Individual heuristic components ─────────────────────────────────────────
-
-/**
- * Empty cell bonus: more empty cells = more room to maneuver.
- * Weight: high — an empty board gives the most freedom.
- */
-function emptyBonus(board: NumBoard): number {
-  let count = 0;
-  for (const row of board) {
-    for (const v of row) {
-      if (v === 0) count++;
-    }
-  }
-  return count * 200;
+  return variants;
 }
 
-/**
- * Max tile value: logarithmic score for the highest tile.
- */
-function maxTileBonus(board: NumBoard): number {
-  let max = 0;
-  for (const row of board) {
-    for (const v of row) {
-      if (v > max) max = v;
-    }
-  }
-  return max > 0 ? Math.log2(max) * 50 : 0;
+function strongestWeightCorner(weights: number[][]): Corner {
+  const size = weights.length;
+  const corners: Array<[Corner, number]> = [
+    ["top-left", weights[0][0]],
+    ["top-right", weights[0][size - 1]],
+    ["bottom-left", weights[size - 1][0]],
+    ["bottom-right", weights[size - 1][size - 1]],
+  ];
+  corners.sort((a, b) => b[1] - a[1]);
+  return corners[0][0];
 }
 
-/**
- * Corner bonus: reward when the max tile is in a corner.
- * This is critical for snake-pattern strategies.
- */
-function cornerBonus(board: NumBoard): number {
+export function choosePreferredCorner(board: NumBoard): Corner {
+  const max = getMaxTile(board);
   const size = board.length;
-  let max = 0;
-  for (const row of board) {
-    for (const v of row) {
-      if (v > max) max = v;
-    }
-  }
-
-  const corners = [
-    board[0][0],
-    board[0][size - 1],
-    board[size - 1][0],
-    board[size - 1][size - 1],
+  const maxCorners: Array<[Corner, number]> = [
+    ["top-left", board[0][0]],
+    ["top-right", board[0][size - 1]],
+    ["bottom-left", board[size - 1][0]],
+    ["bottom-right", board[size - 1][size - 1]],
   ];
 
-  if (corners.includes(max)) {
-    return max * 2;
+  const cornerWithMax = maxCorners.find(([, value]) => value === max);
+  if (cornerWithMax) return cornerWithMax[0];
+
+  let bestCorner: Corner = "top-left";
+  let bestScore = -Infinity;
+  for (const variant of SNAKE_VARIANTS) {
+    const score = scoreSnakeVariant(board, variant.weights);
+    if (score > bestScore) {
+      bestScore = score;
+      bestCorner = variant.corner;
+    }
   }
-  return 0;
+  return bestCorner;
 }
 
-/**
- * Monotonicity: reward rows/columns that are monotonically increasing or decreasing.
- * Lower penalty = better score.
- */
+export function evaluate(board: NumBoard, options: EvaluationOptions = {}): number {
+  const preferredCorner = options.preferredCorner ?? choosePreferredCorner(board);
+  const riskWeight = options.riskWeight ?? 1;
+
+  return (
+    emptyBonus(board) +
+    maxTileBonus(board) +
+    cornerStability(board, preferredCorner, riskWeight) +
+    monotonicityScore(board) +
+    smoothnessScore(board) +
+    mergePotential(board) +
+    snakeWeight(board, preferredCorner) +
+    edgeStability(board) +
+    isolationPenalty(board, riskWeight) +
+    failureRiskPenalty(board, riskWeight)
+  );
+}
+
+function emptyBonus(board: NumBoard): number {
+  const empty = countEmptyTiles(board);
+  return empty * 250 + empty * empty * 120;
+}
+
+function maxTileBonus(board: NumBoard): number {
+  const max = getMaxTile(board);
+  return max > 0 ? Math.log2(max) * max * 0.35 : 0;
+}
+
+function cornerStability(
+  board: NumBoard,
+  preferredCorner: Corner,
+  riskWeight: number
+): number {
+  const max = getMaxTile(board);
+  const maxCorner = cornerForValue(board, max);
+  if (maxCorner === preferredCorner) return max * 5;
+  if (maxCorner) return max * 1.5;
+  return -max * 3 * riskWeight;
+}
+
 function monotonicityScore(board: NumBoard): number {
   const size = board.length;
   let score = 0;
@@ -113,8 +141,8 @@ function monotonicityScore(board: NumBoard): number {
     let incScore = 0;
     let decScore = 0;
     for (let c = 0; c < size - 1; c++) {
-      const a = board[r][c] > 0 ? Math.log2(board[r][c]) : 0;
-      const b = board[r][c + 1] > 0 ? Math.log2(board[r][c + 1]) : 0;
+      const a = logValue(board[r][c]);
+      const b = logValue(board[r][c + 1]);
       if (a > b) incScore += b - a;
       else decScore += a - b;
     }
@@ -125,21 +153,17 @@ function monotonicityScore(board: NumBoard): number {
     let incScore = 0;
     let decScore = 0;
     for (let r = 0; r < size - 1; r++) {
-      const a = board[r][c] > 0 ? Math.log2(board[r][c]) : 0;
-      const b = board[r + 1][c] > 0 ? Math.log2(board[r + 1][c]) : 0;
+      const a = logValue(board[r][c]);
+      const b = logValue(board[r + 1][c]);
       if (a > b) incScore += b - a;
       else decScore += a - b;
     }
     score += Math.max(incScore, decScore);
   }
 
-  return score * 25;
+  return score * 120;
 }
 
-/**
- * Smoothness: penalize large differences between adjacent tiles.
- * Adjacent similar-valued tiles are easier to merge.
- */
 function smoothnessScore(board: NumBoard): number {
   const size = board.length;
   let penalty = 0;
@@ -147,63 +171,61 @@ function smoothnessScore(board: NumBoard): number {
   for (let r = 0; r < size; r++) {
     for (let c = 0; c < size; c++) {
       if (board[r][c] === 0) continue;
-      const logVal = Math.log2(board[r][c]);
+      const current = logValue(board[r][c]);
 
       if (c + 1 < size && board[r][c + 1] !== 0) {
-        penalty -= Math.abs(logVal - Math.log2(board[r][c + 1]));
+        penalty -= Math.abs(current - logValue(board[r][c + 1]));
       }
       if (r + 1 < size && board[r + 1][c] !== 0) {
-        penalty -= Math.abs(logVal - Math.log2(board[r + 1][c]));
+        penalty -= Math.abs(current - logValue(board[r + 1][c]));
       }
     }
   }
 
-  return penalty * 15;
+  return penalty * 45;
 }
 
-/**
- * Merge potential: count pairs of identical adjacent tiles (potential merges).
- * More merges available = more scoring opportunities.
- */
 function mergePotential(board: NumBoard): number {
   const size = board.length;
-  let count = 0;
+  let score = 0;
 
   for (let r = 0; r < size; r++) {
     for (let c = 0; c < size; c++) {
-      if (board[r][c] === 0) continue;
-      if (c + 1 < size && board[r][c] === board[r][c + 1]) count++;
-      if (r + 1 < size && board[r][c] === board[r + 1][c]) count++;
+      const value = board[r][c];
+      if (value === 0) continue;
+      if (c + 1 < size && value === board[r][c + 1]) score += logValue(value) * 90;
+      if (r + 1 < size && value === board[r + 1][c]) score += logValue(value) * 90;
     }
   }
 
-  return count * 100;
+  return score;
 }
 
-/**
- * Snake weight matrix: reward board configurations that match the
- * snake pattern (keeping largest values along a snake path from a corner).
- */
-function snakeWeight(board: NumBoard): number {
-  const size = board.length;
+function snakeWeight(board: NumBoard, preferredCorner: Corner): number {
+  const preferredVariants = SNAKE_VARIANTS.filter(
+    (variant) => variant.corner === preferredCorner
+  );
+  const variants = preferredVariants.length > 0 ? preferredVariants : SNAKE_VARIANTS;
   let best = -Infinity;
 
-  for (const weights of SNAKE_VARIANTS) {
-    let score = 0;
-    for (let r = 0; r < size; r++) {
-      for (let c = 0; c < size; c++) {
-        score += board[r][c] * weights[r][c];
-      }
-    }
+  for (const variant of variants) {
+    const score = scoreSnakeVariant(board, variant.weights);
     if (score > best) best = score;
   }
 
-  return best * 0.1;
+  return best * 130;
 }
 
-/**
- * Edge stability: reward tiles on the edge/border (harder to displace).
- */
+function scoreSnakeVariant(board: NumBoard, weights: number[][]): number {
+  let score = 0;
+  for (let r = 0; r < board.length; r++) {
+    for (let c = 0; c < board[r].length; c++) {
+      score += logValue(board[r][c]) * weights[r][c];
+    }
+  }
+  return score;
+}
+
 function edgeStability(board: NumBoard): number {
   const size = board.length;
   let score = 0;
@@ -211,48 +233,103 @@ function edgeStability(board: NumBoard): number {
   for (let r = 0; r < size; r++) {
     for (let c = 0; c < size; c++) {
       if (r === 0 || r === size - 1 || c === 0 || c === size - 1) {
-        score += board[r][c];
+        score += logValue(board[r][c]) * 30;
       }
     }
   }
 
-  return score * 0.5;
+  return score;
 }
 
-/**
- * Failure risk penalty: when there are very few empty cells, apply a large penalty
- * to discourage moves that lead to near-full boards.
- */
-function failureRiskPenalty(board: NumBoard): number {
-  let empty = 0;
-  for (const row of board) {
-    for (const v of row) {
-      if (v === 0) empty++;
+function isolationPenalty(board: NumBoard, riskWeight: number): number {
+  const size = board.length;
+  let penalty = 0;
+
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      const value = board[r][c];
+      if (value === 0) continue;
+
+      const current = logValue(value);
+      const hasFriendlyNeighbor = neighbors(board, r, c).some((neighbor) => {
+        if (neighbor === 0) return true;
+        return Math.abs(current - logValue(neighbor)) <= 1;
+      });
+
+      if (!hasFriendlyNeighbor) penalty -= current * 55 * riskWeight;
     }
   }
 
-  if (empty === 0) return -100000; // immediate game over risk
-  if (empty <= 2) return -5000;
-  if (empty <= 4) return -500;
-  return 0;
+  return penalty;
 }
 
-// ── Main evaluation function ─────────────────────────────────────────────────
+function failureRiskPenalty(board: NumBoard, riskWeight: number): number {
+  const empty = countEmptyTiles(board);
+  const merges = countMergeOpportunities(board);
 
-/**
- * Evaluate a board position with a weighted combination of heuristics.
- * Returns a numeric score — higher is better.
- */
-export function evaluate(board: NumBoard): number {
-  return (
-    emptyBonus(board) +
-    maxTileBonus(board) +
-    cornerBonus(board) +
-    monotonicityScore(board) +
-    smoothnessScore(board) +
-    mergePotential(board) +
-    snakeWeight(board) +
-    edgeStability(board) +
-    failureRiskPenalty(board)
-  );
+  if (empty === 0 && merges === 0) return -120000 * riskWeight;
+  if (empty <= 1) return (-12000 + merges * 1500) * riskWeight;
+  if (empty <= 3) return (-3500 + merges * 900) * riskWeight;
+  if (empty <= 5) return (-700 + merges * 250) * riskWeight;
+  return merges * 120;
+}
+
+function countMergeOpportunities(board: NumBoard): number {
+  const size = board.length;
+  let count = 0;
+
+  for (let r = 0; r < size; r++) {
+    for (let c = 0; c < size; c++) {
+      const value = board[r][c];
+      if (value === 0) continue;
+      if (c + 1 < size && value === board[r][c + 1]) count++;
+      if (r + 1 < size && value === board[r + 1][c]) count++;
+    }
+  }
+
+  return count;
+}
+
+function neighbors(board: NumBoard, row: number, col: number): number[] {
+  const values: number[] = [];
+  if (row > 0) values.push(board[row - 1][col]);
+  if (row + 1 < board.length) values.push(board[row + 1][col]);
+  if (col > 0) values.push(board[row][col - 1]);
+  if (col + 1 < board[row].length) values.push(board[row][col + 1]);
+  return values;
+}
+
+function cornerForValue(board: NumBoard, value: number): Corner | null {
+  const size = board.length;
+  const corners: Array<[Corner, number]> = [
+    ["top-left", board[0][0]],
+    ["top-right", board[0][size - 1]],
+    ["bottom-left", board[size - 1][0]],
+    ["bottom-right", board[size - 1][size - 1]],
+  ];
+  return corners.find(([, cornerValue]) => cornerValue === value)?.[0] ?? null;
+}
+
+function getMaxTile(board: NumBoard): number {
+  let max = 0;
+  for (const row of board) {
+    for (const value of row) {
+      if (value > max) max = value;
+    }
+  }
+  return max;
+}
+
+function countEmptyTiles(board: NumBoard): number {
+  let count = 0;
+  for (const row of board) {
+    for (const value of row) {
+      if (value === 0) count++;
+    }
+  }
+  return count;
+}
+
+function logValue(value: number): number {
+  return value > 0 ? Math.log2(value) : 0;
 }

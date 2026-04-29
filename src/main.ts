@@ -15,9 +15,8 @@ const renderer = new Renderer(game);
 const inputController = new InputController(game);
 const autoPlayer = new AutoPlayer(game, {
   delayMs: 300,
-  maxDepth: 4,
+  thinkingStrength: 6,
   useDynamicDepth: true,
-  timeBudgetMs: 200,
 });
 
 // ── Input → Game ─────────────────────────────────────────────────────────────
@@ -136,13 +135,13 @@ delaySlider.addEventListener("input", () => {
   autoPlayer.setDelay(val);
 });
 
-// Depth slider
-const depthSlider = document.getElementById("depth-slider") as HTMLInputElement;
-const depthValue = document.getElementById("depth-value")!;
-depthSlider.addEventListener("input", () => {
-  const val = parseInt(depthSlider.value, 10);
-  depthValue.textContent = String(val);
-  autoPlayer.setMaxDepth(val);
+// Thinking strength slider
+const strengthSlider = document.getElementById("strength-slider") as HTMLInputElement;
+const strengthValue = document.getElementById("strength-value")!;
+strengthSlider.addEventListener("input", () => {
+  const val = parseInt(strengthSlider.value, 10);
+  strengthValue.textContent = String(val);
+  autoPlayer.setThinkingStrength(val);
 });
 
 // ── Initial render ────────────────────────────────────────────────────────────

@@ -57,15 +57,6 @@ game.onStateChange(() => {
   }
 });
 
-game.onMoveEnd((result) => {
-  if (!result.moved) return;
-
-  const boardValues = result.nextBoardSnapshot.cells.map((row) =>
-    row.map((value) => value ?? 0)
-  );
-  console.log("Current board:", boardValues);
-});
-
 // ── AutoPlayer → UI ──────────────────────────────────────────────────────────
 
 autoPlayer.onStatusChange(() => {

@@ -37,6 +37,7 @@ import {
   type Corner,
   type HeuristicPresetName,
 } from "./heuristic";
+import { findBestMoveViaWasm } from "./wasmEngine";
 
 const DIRECTIONS: Direction[] = ["up", "down", "left", "right"];
 const PROB_2 = 0.9;
@@ -223,6 +224,16 @@ export function findBestMoveForBoard(
   return decision;
 }
 
+export async function findBestMoveForBoardAsync(
+  board: NumBoard,
+  options: FindBestMoveOptions = {}
+): Promise<SearchDecision | null> {
+  const wasmDecision = await findBestMoveViaWasm(board, options);
+  return wasmDecision === undefined
+    ? findBestMoveForBoard(board, options)
+    : wasmDecision;
+}
+
 export class AutoPlayer {
   private readonly game: Game;
   private options: AutoPlayerOptions;
@@ -232,6 +243,7 @@ export class AutoPlayer {
   private loopHandle: ReturnType<typeof setTimeout> | null = null;
   private running: boolean = false;
   private paused: boolean = false;
+  private searchGeneration: number = 0;
 
   private onStatusChangeCallback: (() => void) | null = null;
 
@@ -282,6 +294,7 @@ export class AutoPlayer {
 
   pause(): void {
     if (!this.running || this.paused) return;
+    this.searchGeneration++;
     this.paused = true;
     this.status.state = "paused";
     this.status.message = "Paused.";
@@ -290,6 +303,7 @@ export class AutoPlayer {
   }
 
   stop(): void {
+    this.searchGeneration++;
     this.running = false;
     this.paused = false;
     this.cancelScheduled();
@@ -311,7 +325,13 @@ export class AutoPlayer {
     this.status.message = "Thinking...";
     this.notifyStatusChange();
 
-    const result = await this.computeAndMove();
+    const searchGeneration = ++this.searchGeneration;
+    const result = await this.computeAndMove({
+      requireRunning: false,
+      searchGeneration,
+    });
+
+    if (searchGeneration !== this.searchGeneration) return;
 
     if (result) {
       this.status.state = "paused";
@@ -387,7 +407,10 @@ export class AutoPlayer {
       this.status.state = "thinking";
       this.notifyStatusChange();
 
-      await this.computeAndMove();
+      await this.computeAndMove({
+        requireRunning: true,
+        searchGeneration: this.searchGeneration,
+      });
 
       if (this.running && !this.paused) {
         this.scheduleNextStep();
@@ -402,18 +425,25 @@ export class AutoPlayer {
     }
   }
 
-  private async computeAndMove(): Promise<AutoPlayerResult | null> {
+  private async computeAndMove(options: {
+    requireRunning: boolean;
+    searchGeneration: number;
+  }): Promise<AutoPlayerResult | null> {
     const snapshot = this.game.getBoardSnapshot();
     if (snapshot.isGameOver) return null;
+    if (options.requireRunning && (!this.running || this.paused)) return null;
 
     const board = cellsToNumBoard(snapshot.cells);
-    const search = findBestMoveForBoard(board, {
+    const search = await findBestMoveForBoardAsync(board, {
       thinkingStrength: this.options.thinkingStrength,
       useDynamicDepth: this.options.useDynamicDepth,
       maxDepth: this.options.maxDepth,
       timeBudgetMs: this.options.timeBudgetMs,
       heuristicPreset: this.options.heuristicPreset,
     });
+
+    if (options.searchGeneration !== this.searchGeneration) return null;
+    if (options.requireRunning && (!this.running || this.paused)) return null;
 
     this.status.evaluatedMoves = search?.evaluatedMoves ?? [];
     this.status.lastDepth = search?.depth ?? null;

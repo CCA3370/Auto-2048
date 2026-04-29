@@ -14,6 +14,7 @@ import {
   type NumBoard,
 } from "./autoSimulator";
 import type { HeuristicPresetName } from "./heuristic";
+import { runBenchmarkViaWasm } from "./wasmEngine";
 
 export type Seed = number | string;
 
@@ -129,6 +130,15 @@ export function runBenchmark(
     );
     return summarizeResults(strategy.name, results);
   });
+}
+
+export async function runBenchmarkAsync(
+  seeds: Seed[],
+  strategies: BenchmarkStrategyConfig[],
+  maxMoves?: number
+): Promise<BenchmarkSummary[]> {
+  const wasmSummaries = await runBenchmarkViaWasm(seeds, strategies, maxMoves);
+  return wasmSummaries ?? runBenchmark(seeds, strategies, maxMoves);
 }
 
 function summarizeResults(

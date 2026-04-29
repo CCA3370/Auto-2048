@@ -1,4 +1,7 @@
 node_modules
 dist
+public/wasm-autoplayer
+wasm-autoplayer/target
+.npm-cache
 .DS_Store
 *.local

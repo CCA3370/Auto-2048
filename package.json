@@ -5,13 +5,17 @@
   "private": true,
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "npm run build:wasm && tsc && vite build",
+    "build:app": "tsc && vite build",
+    "build:wasm": "wasm-pack build wasm-autoplayer --target web --out-dir ../public/wasm-autoplayer --release",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:wasm": "cargo test --manifest-path wasm-autoplayer/Cargo.toml"
   },
   "devDependencies": {
     "typescript": "^5.4.5",
     "vite": "^8.0.10",
-    "vitest": "^4.1.5"
+    "vitest": "^4.1.5",
+    "wasm-pack": "^0.14.0"
   }
 }

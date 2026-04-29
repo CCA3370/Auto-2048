@@ -7,6 +7,7 @@ This is a Vite + TypeScript implementation of 2048 with an Expectimax-based Auto
 - `src/main.ts` wires the game, renderer, input controller, and AutoPlayer to the DOM.
 - `src/game/` contains core game state and move logic.
 - `src/autoplay/` contains AutoPlayer orchestration, heuristics, and numeric-board simulation.
+- `wasm-autoplayer/` contains the Rust crate that mirrors the AutoPlayer's pure compute path for WebAssembly.
 - `src/render/` contains DOM rendering and animation code.
 - `src/input/` handles keyboard or input events.
 - `src/styles/style.css` contains application styling.
@@ -17,9 +18,12 @@ This is a Vite + TypeScript implementation of 2048 with an Expectimax-based Auto
 
 - `npm install` installs dependencies from `package-lock.json`.
 - `npm run dev` starts the Vite development server.
-- `npm run build` runs TypeScript checks with `tsc`, then builds production assets into `dist/`.
+- `npm run build:wasm` builds the Rust/WASM AutoPlayer package into `public/wasm-autoplayer/`.
+- `npm run build:app` runs TypeScript checks with `tsc`, then builds production assets into `dist/` without rebuilding WASM.
+- `npm run build` builds the Rust/WASM package first, then builds the production Vite app.
 - `npm run preview` serves the production build locally for inspection.
 - `npm test` runs the Vitest suite once.
+- `npm run test:wasm` runs Rust unit tests for the WASM search engine.
 
 ## Coding Style & Naming Conventions
 
@@ -29,7 +33,7 @@ Follow the existing formatting style: two-space indentation, double quotes, semi
 
 ## Testing Guidelines
 
-Tests use Vitest and live under `src/tests/`. Name test files with the `.test.ts` suffix, for example `moveLogic.test.ts`. Prefer deterministic unit tests for pure game logic and simulator behavior before adding DOM-dependent tests. Run `npm test` before submitting changes, and run `npm run build` when touching shared types, build config, or browser-facing code.
+Tests use Vitest and live under `src/tests/`. Name test files with the `.test.ts` suffix, for example `moveLogic.test.ts`. Prefer deterministic unit tests for pure game logic and simulator behavior before adding DOM-dependent tests. Run `npm test` before submitting changes, and run `npm run build` when touching shared types, build config, or browser-facing code. Run `npm run test:wasm` when touching `wasm-autoplayer/`. `npm run build:wasm` requires Rust with the `wasm32-unknown-unknown` target and the project-local `wasm-pack` npm dependency installed.
 
 ## Commit & Pull Request Guidelines
 

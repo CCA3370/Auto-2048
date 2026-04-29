@@ -1,11 +1,20 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect } from "vitest";
 import {
   createSeededRandom,
   runBenchmark,
+  runBenchmarkAsync,
   runBenchmarkGame,
 } from "../autoplay/benchmark";
+import {
+  resetWasmModuleLoaderForTests,
+  setWasmModuleLoaderForTests,
+} from "../autoplay/wasmEngine";
 
 describe("AutoPlayer benchmark utilities", () => {
+  afterEach(() => {
+    resetWasmModuleLoaderForTests();
+  });
+
   it("creates reproducible random sequences", () => {
     const a = createSeededRandom("fixed-seed");
     const b = createSeededRandom("fixed-seed");
@@ -66,5 +75,30 @@ describe("AutoPlayer benchmark utilities", () => {
     expect(summaries[0].games).toBe(2);
     expect(summaries[0].results).toHaveLength(2);
     expect(summaries[0].averageScore).toBeGreaterThanOrEqual(0);
+  });
+
+  it("falls back to the TypeScript benchmark when WASM is unavailable", async () => {
+    setWasmModuleLoaderForTests(async () => {
+      throw new Error("missing wasm package");
+    });
+
+    const summaries = await runBenchmarkAsync(
+      [3370],
+      [
+        {
+          name: "balanced",
+          thinkingStrength: 1,
+          useDynamicDepth: false,
+          maxDepth: 1,
+          timeBudgetMs: Number.POSITIVE_INFINITY,
+          heuristicPreset: "balanced",
+        },
+      ],
+      8
+    );
+
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0].games).toBe(1);
+    expect(summaries[0].results[0].steps).toBeGreaterThan(0);
   });
 });

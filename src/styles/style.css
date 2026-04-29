@@ -370,6 +370,18 @@ body {
   accent-color: var(--accent);
 }
 
+.setting-group select {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid rgba(119, 110, 101, 0.25);
+  border-radius: var(--border-radius);
+  background: rgba(255, 255, 255, 0.75);
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: 700;
+  padding: 6px 10px;
+}
+
 .autoplayer-status {
   background: rgba(187, 173, 160, 0.15);
   border-radius: var(--border-radius);

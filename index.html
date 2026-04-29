@@ -83,6 +83,14 @@
 
         <div class="autoplayer-settings">
           <div class="setting-group">
+            <label for="strategy-select">Strategy</label>
+            <select id="strategy-select">
+              <option value="balanced" selected>Balanced</option>
+              <option value="high-score">High Score</option>
+              <option value="survival">Survival</option>
+            </select>
+          </div>
+          <div class="setting-group">
             <label for="delay-slider">Delay: <span id="delay-value">300</span>ms</label>
             <input type="range" id="delay-slider" min="0" max="2000" step="50" value="300" />
           </div>

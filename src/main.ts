@@ -7,6 +7,7 @@ import { Renderer } from "./render/Renderer";
 import { InputController } from "./input/InputController";
 import { AutoPlayer } from "./autoplay/AutoPlayer";
 import type { Direction, MoveResult } from "./types";
+import type { HeuristicPresetName } from "./autoplay/heuristic";
 
 // ── Instantiate core objects ─────────────────────────────────────────────────
 
@@ -17,6 +18,7 @@ const autoPlayer = new AutoPlayer(game, {
   delayMs: 300,
   thinkingStrength: 6,
   useDynamicDepth: true,
+  heuristicPreset: "balanced",
 });
 
 // ── Input → Game ─────────────────────────────────────────────────────────────
@@ -118,6 +120,11 @@ document.getElementById("btn-auto-step")!.addEventListener("click", async () => 
 });
 
 // Delay slider
+const strategySelect = document.getElementById("strategy-select") as HTMLSelectElement;
+strategySelect.addEventListener("change", () => {
+  autoPlayer.setHeuristicPreset(strategySelect.value as HeuristicPresetName);
+});
+
 const delaySlider = document.getElementById("delay-slider") as HTMLInputElement;
 const delayValue = document.getElementById("delay-value")!;
 delaySlider.addEventListener("input", () => {

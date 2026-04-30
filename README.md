@@ -16,6 +16,58 @@ initialize.
   build.
 - `npm test` runs the Vitest suite.
 - `npm run test:wasm` runs Rust unit tests for the WASM search engine.
+- `cargo run --manifest-path wasm-autoplayer/Cargo.toml --bin autoplayer-cli -- --help`
+  runs the native Rust AutoPlayer CLI without the browser or Vite stack.
+
+## Native AutoPlayer CLI
+
+The Rust engine can run outside the web app. The CLI writes JSON so it can be
+used from scripts or benchmark jobs.
+
+```sh
+cargo run --manifest-path wasm-autoplayer/Cargo.toml --bin autoplayer-cli -- \
+  decide --board "2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0" --depth 1
+
+cargo run --manifest-path wasm-autoplayer/Cargo.toml --bin autoplayer-cli -- \
+  play --seed 3370 --strength 10 --depth 8 --max-moves 2000
+
+cargo run --manifest-path wasm-autoplayer/Cargo.toml --bin autoplayer-cli -- \
+  bench --seeds 1,2,3 --strategy strong:10:survival:8 --progress
+```
+
+The native engine uses a 64-bit bitboard internally, with each tile stored as a
+4-bit exponent. That supports tiles through 32768 in the Rust/WASM search path.
+For `bench --progress`, live score lines are written to stderr and the final
+benchmark summary remains JSON on stdout.
+
+### CUDA Rollout Backend
+
+The native CLI can be built with an optional NVIDIA CUDA rollout backend. The
+default backend is still CPU Expectimax; CUDA is only used when the CLI is run
+with `--backend cuda-rollout`.
+
+CUDA support is native-only and requires the CUDA Toolkit with `nvcc` available
+through `PATH`, `CUDA_PATH`, or `NVCC`.
+
+```sh
+cargo build --release --features cuda \
+  --manifest-path wasm-autoplayer/Cargo.toml \
+  --bin autoplayer-cli
+
+wasm-autoplayer/target/release/autoplayer-cli bench \
+  --backend cuda-rollout \
+  --gpu 0 \
+  --rollouts 65536 \
+  --rollout-steps 512 \
+  --seeds 1,2,3 \
+  --progress
+```
+
+CUDA mode evaluates each legal root move with batched deterministic rollouts on
+the selected GPU, then chooses the move with the best rollout score. If the CUDA
+feature is not compiled in, or CUDA initialization fails, the CLI returns an
+explicit error and does not silently switch to CPU results. Use `--backend cpu`
+for the regular Expectimax path.
 
 ## Rust/WASM Tooling
 

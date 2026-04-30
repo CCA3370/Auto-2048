@@ -3,8 +3,41 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use wasm_bindgen::prelude::*;
 
+#[cfg(all(feature = "cuda", not(target_arch = "wasm32")))]
+mod cuda_rollout;
+
+#[cfg(not(all(feature = "cuda", not(target_arch = "wasm32"))))]
+mod cuda_rollout {
+    use super::{Board, DecisionConfig, FindBestMoveOptions, SearchDecision};
+
+    pub(crate) fn device_count() -> Result<i32, String> {
+        Err(unavailable_message())
+    }
+
+    pub(crate) fn device_name(_gpu_index: u32) -> Result<String, String> {
+        Err(unavailable_message())
+    }
+
+    pub(crate) fn find_best_move_cuda_rollout(
+        _board: Board,
+        _options: &FindBestMoveOptions,
+        _decision_config: &DecisionConfig,
+    ) -> Result<Option<SearchDecision>, String> {
+        Err(unavailable_message())
+    }
+
+    fn unavailable_message() -> String {
+        "CUDA rollout backend is not available in this build. Rebuild the native CLI with --features cuda and a CUDA Toolkit installation that provides nvcc.".to_string()
+    }
+}
+
 const SIZE: usize = 4;
 const CELLS: usize = SIZE * SIZE;
+const ROW_TABLE_SIZE: usize = 1 << 16;
+const CELL_MASK: u64 = 0xF;
+const MAX_TILE_EXPONENT: u8 = 15;
+const MAX_SEARCH_DEPTH: u32 = 10;
+const DEFAULT_ROLLOUT_STEPS: u32 = 512;
 const PROB_2: f64 = 0.9;
 const PROB_4: f64 = 0.1;
 const DEFAULT_THINKING_STRENGTH: u32 = 6;
@@ -54,8 +87,112 @@ pub fn evaluate_board(board: Vec<u32>, options: JsValue) -> Result<f64, JsValue>
     Ok(evaluate(&board, &options))
 }
 
+pub fn find_best_move_for_values(
+    values: &[u32],
+    options: FindBestMoveOptions,
+) -> Result<Option<SearchDecision>, String> {
+    find_best_move_for_values_with_decision_config(values, options, &DecisionConfig::default())
+}
+
+pub fn find_best_move_for_values_with_decision_config(
+    values: &[u32],
+    options: FindBestMoveOptions,
+    decision_config: &DecisionConfig,
+) -> Result<Option<SearchDecision>, String> {
+    find_best_move_with_decision_config(Board::from_values(values)?, &options, decision_config)
+}
+
+pub fn simulate_move_for_values(
+    values: &[u32],
+    direction: &str,
+) -> Result<MoveSimulationResult, String> {
+    let board = Board::from_values(values)?;
+    let direction =
+        Direction::from_name(direction).ok_or_else(|| format!("invalid direction: {direction}"))?;
+    Ok(MoveSimulationResult::from(simulate_move(board, direction)))
+}
+
+pub fn evaluate_board_values(values: &[u32], options: EvaluationOptions) -> Result<f64, String> {
+    let board = Board::from_values(values)?;
+    Ok(evaluate(&board, &options))
+}
+
+pub fn run_benchmark_for_configs(
+    seeds: &[Seed],
+    strategies: &[BenchmarkStrategyConfig],
+    max_moves: Option<u32>,
+) -> Vec<BenchmarkSummary> {
+    run_benchmark_core(seeds, strategies, max_moves)
+}
+
+pub fn run_benchmark_for_configs_with_progress(
+    seeds: &[Seed],
+    strategies: &[BenchmarkStrategyConfig],
+    max_moves: Option<u32>,
+    mut on_progress: impl FnMut(&BenchmarkProgress),
+) -> Vec<BenchmarkSummary> {
+    run_benchmark_core_with_progress(seeds, strategies, max_moves, &mut on_progress)
+}
+
+pub fn run_benchmark_for_configs_with_decision_config(
+    seeds: &[Seed],
+    strategies: &[BenchmarkStrategyConfig],
+    max_moves: Option<u32>,
+    decision_config: &DecisionConfig,
+) -> Result<Vec<BenchmarkSummary>, String> {
+    let mut ignore_progress = ignore_benchmark_progress;
+    run_benchmark_core_with_progress_and_decision_config(
+        seeds,
+        strategies,
+        max_moves,
+        decision_config,
+        &mut ignore_progress,
+    )
+}
+
+pub fn run_benchmark_for_configs_with_progress_and_decision_config(
+    seeds: &[Seed],
+    strategies: &[BenchmarkStrategyConfig],
+    max_moves: Option<u32>,
+    decision_config: &DecisionConfig,
+    mut on_progress: impl FnMut(&BenchmarkProgress),
+) -> Result<Vec<BenchmarkSummary>, String> {
+    run_benchmark_core_with_progress_and_decision_config(
+        seeds,
+        strategies,
+        max_moves,
+        decision_config,
+        &mut on_progress,
+    )
+}
+
+pub fn play_game_for_config(
+    seed: Seed,
+    strategy: &BenchmarkStrategyConfig,
+    max_moves: u32,
+) -> BenchmarkGameResult {
+    run_benchmark_game(seed, strategy, max_moves)
+}
+
+pub fn play_game_for_config_with_decision_config(
+    seed: Seed,
+    strategy: &BenchmarkStrategyConfig,
+    max_moves: u32,
+    decision_config: &DecisionConfig,
+) -> Result<BenchmarkGameResult, String> {
+    run_benchmark_game_with_decision_config(seed, strategy, max_moves, decision_config)
+}
+
+pub fn cuda_device_count() -> Result<i32, String> {
+    cuda_rollout::device_count()
+}
+
+pub fn cuda_device_name(gpu_index: u32) -> Result<String, String> {
+    cuda_rollout::device_name(gpu_index)
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct Board([u32; CELLS]);
+pub struct Board(u64);
 
 impl Board {
     fn from_values(values: &[u32]) -> Result<Self, String> {
@@ -66,21 +203,69 @@ impl Board {
             ));
         }
 
-        let mut board = [0; CELLS];
-        board.copy_from_slice(values);
-        Ok(Self(board))
+        let mut board = Self::empty();
+        for (index, value) in values.iter().copied().enumerate() {
+            board.set_rank_at_index(index, tile_value_to_rank(value)?);
+        }
+        Ok(board)
     }
 
     fn empty() -> Self {
-        Self([0; CELLS])
+        Self(0)
     }
 
     fn get(&self, row: usize, col: usize) -> u32 {
-        self.0[row * SIZE + col]
+        rank_to_tile_value(self.rank(row, col))
     }
 
     fn set(&mut self, row: usize, col: usize, value: u32) {
-        self.0[row * SIZE + col] = value;
+        self.set_rank(
+            row,
+            col,
+            tile_value_to_rank(value).expect("invalid tile value"),
+        );
+    }
+
+    fn rank(&self, row: usize, col: usize) -> u8 {
+        self.rank_at_index(row * SIZE + col)
+    }
+
+    fn rank_at_index(&self, index: usize) -> u8 {
+        ((self.0 >> (index * 4)) & CELL_MASK) as u8
+    }
+
+    fn set_rank(&mut self, row: usize, col: usize, rank: u8) {
+        self.set_rank_at_index(row * SIZE + col, rank);
+    }
+
+    fn set_rank_at_index(&mut self, index: usize, rank: u8) {
+        let shift = index * 4;
+        self.0 &= !(CELL_MASK << shift);
+        self.0 |= (rank.min(MAX_TILE_EXPONENT) as u64) << shift;
+    }
+
+    fn row_key(&self, row: usize) -> u16 {
+        ((self.0 >> (row * 16)) & 0xFFFF) as u16
+    }
+
+    fn set_row_key(&mut self, row: usize, key: u16) {
+        let shift = row * 16;
+        self.0 &= !(0xFFFF_u64 << shift);
+        self.0 |= (key as u64) << shift;
+    }
+
+    fn column_key(&self, col: usize) -> u16 {
+        let mut key = 0_u16;
+        for row in 0..SIZE {
+            key |= (self.rank(row, col) as u16) << (row * 4);
+        }
+        key
+    }
+
+    fn set_column_key(&mut self, col: usize, key: u16) {
+        for row in 0..SIZE {
+            self.set_rank(row, col, row_rank(key, row));
+        }
     }
 
     fn rows(&self) -> [[u32; SIZE]; SIZE] {
@@ -103,7 +288,7 @@ impl Board {
         let mut cells = Vec::new();
         for row in 0..SIZE {
             for col in 0..SIZE {
-                if self.get(row, col) == 0 {
+                if self.rank(row, col) == 0 {
                     cells.push((row, col));
                 }
             }
@@ -112,16 +297,30 @@ impl Board {
     }
 
     fn count_empty(&self) -> usize {
-        self.0.iter().filter(|value| **value == 0).count()
+        let mut count = 0;
+        for index in 0..CELLS {
+            if self.rank_at_index(index) == 0 {
+                count += 1;
+            }
+        }
+        count
     }
 
     fn max_tile(&self) -> u32 {
-        self.0.iter().copied().max().unwrap_or(0)
+        rank_to_tile_value(self.max_rank())
+    }
+
+    fn max_rank(&self) -> u8 {
+        let mut max = 0;
+        for index in 0..CELLS {
+            max = max.max(self.rank_at_index(index));
+        }
+        max
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Direction {
+pub enum Direction {
     Up,
     Down,
     Left,
@@ -142,6 +341,16 @@ impl Direction {
             1 => Some(Self::Down),
             2 => Some(Self::Left),
             3 => Some(Self::Right),
+            _ => None,
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "up" => Some(Self::Up),
+            "down" => Some(Self::Down),
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
             _ => None,
         }
     }
@@ -172,12 +381,12 @@ struct SimulatedMove {
     moved: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MoveSimulationResult {
-    board: [[u32; SIZE]; SIZE],
-    score: u32,
-    moved: bool,
+pub struct MoveSimulationResult {
+    pub board: [[u32; SIZE]; SIZE],
+    pub score: u32,
+    pub moved: bool,
 }
 
 impl From<SimulatedMove> for MoveSimulationResult {
@@ -192,7 +401,7 @@ impl From<SimulatedMove> for MoveSimulationResult {
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
-enum HeuristicPresetName {
+pub enum HeuristicPresetName {
     Balanced,
     HighScore,
     Survival,
@@ -220,7 +429,7 @@ struct HeuristicWeights {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "kebab-case")]
-enum Corner {
+pub enum Corner {
     TopLeft,
     TopRight,
     BottomLeft,
@@ -229,20 +438,53 @@ enum Corner {
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct EvaluationOptions {
-    preferred_corner: Option<Corner>,
-    risk_weight: Option<f64>,
-    preset: Option<HeuristicPresetName>,
+pub struct EvaluationOptions {
+    pub preferred_corner: Option<Corner>,
+    pub risk_weight: Option<f64>,
+    pub preset: Option<HeuristicPresetName>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct FindBestMoveOptions {
-    thinking_strength: Option<f64>,
-    use_dynamic_depth: Option<bool>,
-    max_depth: Option<u32>,
-    time_budget_ms: Option<f64>,
-    heuristic_preset: Option<HeuristicPresetName>,
+pub struct FindBestMoveOptions {
+    pub thinking_strength: Option<f64>,
+    pub use_dynamic_depth: Option<bool>,
+    pub max_depth: Option<u32>,
+    pub time_budget_ms: Option<f64>,
+    pub heuristic_preset: Option<HeuristicPresetName>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DecisionBackend {
+    Cpu,
+    CudaRollout,
+}
+
+#[derive(Clone, Debug)]
+pub struct DecisionConfig {
+    pub backend: DecisionBackend,
+    pub gpu_index: u32,
+    pub rollouts: Option<u32>,
+    pub rollout_steps: u32,
+}
+
+impl Default for DecisionConfig {
+    fn default() -> Self {
+        Self {
+            backend: DecisionBackend::Cpu,
+            gpu_index: 0,
+            rollouts: None,
+            rollout_steps: DEFAULT_ROLLOUT_STEPS,
+        }
+    }
+}
+
+impl DecisionConfig {
+    pub fn resolved_rollouts(&self, options: &FindBestMoveOptions) -> u32 {
+        self.rollouts
+            .unwrap_or_else(|| default_cuda_rollouts_for_options(options))
+            .max(1)
+    }
 }
 
 #[derive(Clone)]
@@ -258,31 +500,31 @@ struct SearchConfig {
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SearchMetrics {
-    nodes: u32,
-    cache_hits: u32,
-    cache_misses: u32,
-    chance_nodes: u32,
-    duration_ms: f64,
-    timed_out: bool,
+pub struct SearchMetrics {
+    pub nodes: u32,
+    pub cache_hits: u32,
+    pub cache_misses: u32,
+    pub chance_nodes: u32,
+    pub duration_ms: f64,
+    pub timed_out: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct EvaluatedMove {
-    direction: String,
-    score: f64,
-    valid: bool,
+pub struct EvaluatedMove {
+    pub direction: String,
+    pub score: f64,
+    pub valid: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SearchDecision {
-    best_direction: Option<String>,
-    best_score: f64,
-    depth: u8,
-    evaluated_moves: Vec<EvaluatedMove>,
-    metrics: SearchMetrics,
+pub struct SearchDecision {
+    pub best_direction: Option<String>,
+    pub best_score: f64,
+    pub depth: u8,
+    pub evaluated_moves: Vec<EvaluatedMove>,
+    pub metrics: SearchMetrics,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -313,28 +555,28 @@ struct OrderedMove {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(untagged)]
-enum Seed {
+pub enum Seed {
     Number(f64),
     String(String),
 }
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct BenchmarkStrategyConfig {
-    name: String,
-    thinking_strength: Option<f64>,
-    use_dynamic_depth: Option<bool>,
-    max_depth: Option<u32>,
-    time_budget_ms: Option<f64>,
-    heuristic_preset: Option<HeuristicPresetName>,
+pub struct BenchmarkStrategyConfig {
+    pub name: String,
+    pub thinking_strength: Option<f64>,
+    pub use_dynamic_depth: Option<bool>,
+    pub max_depth: Option<u32>,
+    pub time_budget_ms: Option<f64>,
+    pub heuristic_preset: Option<HeuristicPresetName>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
-struct MoveCounts {
-    up: u32,
-    down: u32,
-    left: u32,
-    right: u32,
+pub struct MoveCounts {
+    pub up: u32,
+    pub down: u32,
+    pub left: u32,
+    pub right: u32,
 }
 
 impl MoveCounts {
@@ -350,37 +592,51 @@ impl MoveCounts {
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct BenchmarkGameResult {
-    seed: Seed,
-    strategy_name: String,
-    score: u32,
-    max_tile: u32,
-    steps: u32,
-    final_board: [[u32; SIZE]; SIZE],
-    move_counts: MoveCounts,
+pub struct BenchmarkGameResult {
+    pub seed: Seed,
+    pub strategy_name: String,
+    pub score: u32,
+    pub max_tile: u32,
+    pub steps: u32,
+    pub final_board: [[u32; SIZE]; SIZE],
+    pub move_counts: MoveCounts,
     #[serde(rename = "reached2048")]
-    reached_2048: bool,
+    pub reached_2048: bool,
     #[serde(rename = "reached4096")]
-    reached_4096: bool,
+    pub reached_4096: bool,
     #[serde(rename = "reached8192")]
-    reached_8192: bool,
+    pub reached_8192: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct BenchmarkSummary {
-    strategy_name: String,
-    games: usize,
-    average_score: f64,
-    median_score: f64,
-    best_score: u32,
-    average_steps: f64,
-    best_tile: u32,
-    reached2048_rate: f64,
-    reached4096_rate: f64,
-    reached8192_rate: f64,
-    max_tile_distribution: BTreeMap<u32, u32>,
-    results: Vec<BenchmarkGameResult>,
+pub struct BenchmarkProgress {
+    pub seed: Seed,
+    pub strategy_name: String,
+    pub strategy_index: usize,
+    pub strategy_count: usize,
+    pub game_index: usize,
+    pub game_count: usize,
+    pub step: u32,
+    pub score: u32,
+    pub max_tile: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BenchmarkSummary {
+    pub strategy_name: String,
+    pub games: usize,
+    pub average_score: f64,
+    pub median_score: f64,
+    pub best_score: u32,
+    pub average_steps: f64,
+    pub best_tile: u32,
+    pub reached2048_rate: f64,
+    pub reached4096_rate: f64,
+    pub reached8192_rate: f64,
+    pub max_tile_distribution: BTreeMap<u32, u32>,
+    pub results: Vec<BenchmarkGameResult>,
 }
 
 impl From<&BenchmarkStrategyConfig> for FindBestMoveOptions {
@@ -409,27 +665,118 @@ fn parse_evaluation_options(value: JsValue) -> Result<EvaluationOptions, JsValue
     serde_wasm_bindgen::from_value(value).map_err(|err| js_error(err.to_string()))
 }
 
-fn slide_left(row: [u32; SIZE]) -> ([u32; SIZE], u32) {
-    let tiles: Vec<u32> = row.into_iter().filter(|value| *value != 0).collect();
-    let mut result = [0; SIZE];
-    let mut score = 0;
+fn tile_value_to_rank(value: u32) -> Result<u8, String> {
+    if value == 0 {
+        return Ok(0);
+    }
+    if value == 1 || !value.is_power_of_two() {
+        return Err(format!(
+            "tile values must be powers of two >= 2, got {value}"
+        ));
+    }
+
+    let rank = value.trailing_zeros() as u8;
+    if rank > MAX_TILE_EXPONENT {
+        return Err(format!(
+            "tile value {value} exceeds the 64-bit engine limit of {}",
+            rank_to_tile_value(MAX_TILE_EXPONENT)
+        ));
+    }
+    Ok(rank)
+}
+
+fn rank_to_tile_value(rank: u8) -> u32 {
+    if rank == 0 {
+        0
+    } else {
+        1_u32 << rank
+    }
+}
+
+fn row_rank(row: u16, index: usize) -> u8 {
+    ((row >> (index * 4)) & 0xF) as u8
+}
+
+fn pack_row(ranks: [u8; SIZE]) -> u16 {
+    let mut row = 0_u16;
+    for (index, rank) in ranks.into_iter().enumerate() {
+        row |= (rank as u16) << (index * 4);
+    }
+    row
+}
+
+fn reverse_row(row: u16) -> u16 {
+    pack_row([
+        row_rank(row, 3),
+        row_rank(row, 2),
+        row_rank(row, 1),
+        row_rank(row, 0),
+    ])
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RowMove {
+    row: u16,
+    score: u32,
+}
+
+fn left_row_move(row: u16) -> RowMove {
+    left_row_table()[row as usize]
+}
+
+fn right_row_move(row: u16) -> RowMove {
+    let reversed = reverse_row(row);
+    let moved = left_row_move(reversed);
+    RowMove {
+        row: reverse_row(moved.row),
+        score: moved.score,
+    }
+}
+
+fn left_row_table() -> &'static [RowMove] {
+    use std::sync::OnceLock;
+
+    static TABLE: OnceLock<Vec<RowMove>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        (0..ROW_TABLE_SIZE)
+            .map(|row| compute_left_row_move(row as u16))
+            .collect()
+    })
+}
+
+fn compute_left_row_move(row: u16) -> RowMove {
+    let mut tiles = [0_u8; SIZE];
+    let mut tile_count = 0;
+    for index in 0..SIZE {
+        let rank = row_rank(row, index);
+        if rank != 0 {
+            tiles[tile_count] = rank;
+            tile_count += 1;
+        }
+    }
+
+    let mut output = [0_u8; SIZE];
+    let mut score = 0_u32;
     let mut read = 0;
     let mut write = 0;
 
-    while read < tiles.len() {
-        if read + 1 < tiles.len() && tiles[read] == tiles[read + 1] {
-            let merged = tiles[read] * 2;
-            result[write] = merged;
-            score += merged;
+    while read < tile_count {
+        if read + 1 < tile_count && tiles[read] == tiles[read + 1] {
+            let merged = tiles[read].saturating_add(1).min(MAX_TILE_EXPONENT);
+            output[write] = merged;
+            score = score.saturating_add(rank_to_tile_value(merged));
             read += 2;
         } else {
-            result[write] = tiles[read];
+            output[write] = tiles[read];
             read += 1;
         }
         write += 1;
     }
 
-    (result, score)
+    RowMove {
+        row: pack_row(output),
+        score,
+    }
 }
 
 fn simulate_move(board: Board, direction: Direction) -> SimulatedMove {
@@ -440,78 +787,46 @@ fn simulate_move(board: Board, direction: Direction) -> SimulatedMove {
     match direction {
         Direction::Left => {
             for row in 0..SIZE {
-                let old = [
-                    next.get(row, 0),
-                    next.get(row, 1),
-                    next.get(row, 2),
-                    next.get(row, 3),
-                ];
-                let (new_row, score) = slide_left(old);
-                if new_row != old {
+                let old = next.row_key(row);
+                let row_move = left_row_move(old);
+                if row_move.row != old {
                     moved = true;
                 }
-                for (col, value) in new_row.into_iter().enumerate() {
-                    next.set(row, col, value);
-                }
-                total_score += score;
+                next.set_row_key(row, row_move.row);
+                total_score += row_move.score;
             }
         }
         Direction::Right => {
             for row in 0..SIZE {
-                let old = [
-                    next.get(row, 0),
-                    next.get(row, 1),
-                    next.get(row, 2),
-                    next.get(row, 3),
-                ];
-                let reversed = [old[3], old[2], old[1], old[0]];
-                let (new_row, score) = slide_left(reversed);
-                let flipped = [new_row[3], new_row[2], new_row[1], new_row[0]];
-                if flipped != old {
+                let old = next.row_key(row);
+                let row_move = right_row_move(old);
+                if row_move.row != old {
                     moved = true;
                 }
-                for (col, value) in flipped.into_iter().enumerate() {
-                    next.set(row, col, value);
-                }
-                total_score += score;
+                next.set_row_key(row, row_move.row);
+                total_score += row_move.score;
             }
         }
         Direction::Up => {
             for col in 0..SIZE {
-                let old = [
-                    next.get(0, col),
-                    next.get(1, col),
-                    next.get(2, col),
-                    next.get(3, col),
-                ];
-                let (new_col, score) = slide_left(old);
-                if new_col != old {
+                let old = next.column_key(col);
+                let col_move = left_row_move(old);
+                if col_move.row != old {
                     moved = true;
                 }
-                for (row, value) in new_col.into_iter().enumerate() {
-                    next.set(row, col, value);
-                }
-                total_score += score;
+                next.set_column_key(col, col_move.row);
+                total_score += col_move.score;
             }
         }
         Direction::Down => {
             for col in 0..SIZE {
-                let old = [
-                    next.get(0, col),
-                    next.get(1, col),
-                    next.get(2, col),
-                    next.get(3, col),
-                ];
-                let reversed = [old[3], old[2], old[1], old[0]];
-                let (new_col, score) = slide_left(reversed);
-                let flipped = [new_col[3], new_col[2], new_col[1], new_col[0]];
-                if flipped != old {
+                let old = next.column_key(col);
+                let col_move = right_row_move(old);
+                if col_move.row != old {
                     moved = true;
                 }
-                for (row, value) in flipped.into_iter().enumerate() {
-                    next.set(row, col, value);
-                }
-                total_score += score;
+                next.set_column_key(col, col_move.row);
+                total_score += col_move.score;
             }
         }
     }
@@ -642,9 +957,9 @@ fn empty_bonus(board: &Board, weights: &HeuristicWeights) -> f64 {
 }
 
 fn max_tile_bonus(board: &Board, weights: &HeuristicWeights) -> f64 {
-    let max = board.max_tile();
-    if max > 0 {
-        log_value(max) * max as f64 * weights.max_tile
+    let max_rank = board.max_rank();
+    if max_rank > 0 {
+        max_rank as f64 * rank_to_tile_value(max_rank) as f64 * weights.max_tile
     } else {
         0.0
     }
@@ -674,8 +989,8 @@ fn monotonicity_score(board: &Board, weights: &HeuristicWeights) -> f64 {
         let mut inc_score = 0.0;
         let mut dec_score = 0.0;
         for col in 0..SIZE - 1 {
-            let a = log_value(board.get(row, col));
-            let b = log_value(board.get(row, col + 1));
+            let a = board.rank(row, col) as f64;
+            let b = board.rank(row, col + 1) as f64;
             if a > b {
                 inc_score += b - a;
             } else {
@@ -689,8 +1004,8 @@ fn monotonicity_score(board: &Board, weights: &HeuristicWeights) -> f64 {
         let mut inc_score = 0.0;
         let mut dec_score = 0.0;
         for row in 0..SIZE - 1 {
-            let a = log_value(board.get(row, col));
-            let b = log_value(board.get(row + 1, col));
+            let a = board.rank(row, col) as f64;
+            let b = board.rank(row + 1, col) as f64;
             if a > b {
                 inc_score += b - a;
             } else {
@@ -708,16 +1023,16 @@ fn smoothness_score(board: &Board, weights: &HeuristicWeights) -> f64 {
 
     for row in 0..SIZE {
         for col in 0..SIZE {
-            if board.get(row, col) == 0 {
+            if board.rank(row, col) == 0 {
                 continue;
             }
 
-            let current = log_value(board.get(row, col));
-            if col + 1 < SIZE && board.get(row, col + 1) != 0 {
-                penalty -= (current - log_value(board.get(row, col + 1))).abs();
+            let current = board.rank(row, col) as f64;
+            if col + 1 < SIZE && board.rank(row, col + 1) != 0 {
+                penalty -= (current - board.rank(row, col + 1) as f64).abs();
             }
-            if row + 1 < SIZE && board.get(row + 1, col) != 0 {
-                penalty -= (current - log_value(board.get(row + 1, col))).abs();
+            if row + 1 < SIZE && board.rank(row + 1, col) != 0 {
+                penalty -= (current - board.rank(row + 1, col) as f64).abs();
             }
         }
     }
@@ -730,16 +1045,16 @@ fn merge_potential(board: &Board, weights: &HeuristicWeights) -> f64 {
 
     for row in 0..SIZE {
         for col in 0..SIZE {
-            let value = board.get(row, col);
-            if value == 0 {
+            let rank = board.rank(row, col);
+            if rank == 0 {
                 continue;
             }
 
-            if col + 1 < SIZE && value == board.get(row, col + 1) {
-                score += log_value(value) * weights.merge_potential;
+            if col + 1 < SIZE && rank == board.rank(row, col + 1) {
+                score += rank as f64 * weights.merge_potential;
             }
-            if row + 1 < SIZE && value == board.get(row + 1, col) {
-                score += log_value(value) * weights.merge_potential;
+            if row + 1 < SIZE && rank == board.rank(row + 1, col) {
+                score += rank as f64 * weights.merge_potential;
             }
         }
     }
@@ -775,7 +1090,7 @@ fn edge_stability(board: &Board, weights: &HeuristicWeights) -> f64 {
     for row in 0..SIZE {
         for col in 0..SIZE {
             if row == 0 || row == SIZE - 1 || col == 0 || col == SIZE - 1 {
-                score += log_value(board.get(row, col)) * weights.edge_stability;
+                score += board.rank(row, col) as f64 * weights.edge_stability;
             }
         }
     }
@@ -788,15 +1103,15 @@ fn isolation_penalty(board: &Board, risk_weight: f64, weights: &HeuristicWeights
 
     for row in 0..SIZE {
         for col in 0..SIZE {
-            let value = board.get(row, col);
-            if value == 0 {
+            let rank = board.rank(row, col);
+            if rank == 0 {
                 continue;
             }
 
-            let current = log_value(value);
+            let current = rank as f64;
             let has_friendly_neighbor = neighbors(board, row, col)
                 .iter()
-                .any(|neighbor| *neighbor == 0 || (current - log_value(*neighbor)).abs() <= 1.0);
+                .any(|neighbor| *neighbor == 0 || (current - *neighbor as f64).abs() <= 1.0);
 
             if !has_friendly_neighbor {
                 penalty -= current * weights.isolation_penalty * risk_weight;
@@ -842,14 +1157,14 @@ fn count_merge_opportunities(board: &Board) -> u32 {
     let mut count = 0;
     for row in 0..SIZE {
         for col in 0..SIZE {
-            let value = board.get(row, col);
-            if value == 0 {
+            let rank = board.rank(row, col);
+            if rank == 0 {
                 continue;
             }
-            if col + 1 < SIZE && value == board.get(row, col + 1) {
+            if col + 1 < SIZE && rank == board.rank(row, col + 1) {
                 count += 1;
             }
-            if row + 1 < SIZE && value == board.get(row + 1, col) {
+            if row + 1 < SIZE && rank == board.rank(row + 1, col) {
                 count += 1;
             }
         }
@@ -857,19 +1172,19 @@ fn count_merge_opportunities(board: &Board) -> u32 {
     count
 }
 
-fn neighbors(board: &Board, row: usize, col: usize) -> Vec<u32> {
+fn neighbors(board: &Board, row: usize, col: usize) -> Vec<u8> {
     let mut values = Vec::with_capacity(4);
     if row > 0 {
-        values.push(board.get(row - 1, col));
+        values.push(board.rank(row - 1, col));
     }
     if row + 1 < SIZE {
-        values.push(board.get(row + 1, col));
+        values.push(board.rank(row + 1, col));
     }
     if col > 0 {
-        values.push(board.get(row, col - 1));
+        values.push(board.rank(row, col - 1));
     }
     if col + 1 < SIZE {
-        values.push(board.get(row, col + 1));
+        values.push(board.rank(row, col + 1));
     }
     values
 }
@@ -884,14 +1199,6 @@ fn corner_for_value(board: &Board, value: u32) -> Option<Corner> {
     .iter()
     .find(|(_, corner_value)| *corner_value == value)
     .map(|(corner, _)| *corner)
-}
-
-fn log_value(value: u32) -> f64 {
-    if value > 0 {
-        (value as f64).log2()
-    } else {
-        0.0
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -962,7 +1269,7 @@ fn score_snake_variant(board: &Board, weights: &[[u8; SIZE]; SIZE]) -> f64 {
     let mut score = 0.0;
     for row in 0..SIZE {
         for col in 0..SIZE {
-            score += log_value(board.get(row, col)) * weights[row][col] as f64;
+            score += board.rank(row, col) as f64 * weights[row][col] as f64;
         }
     }
     score
@@ -973,6 +1280,30 @@ fn normalize_thinking_strength(value: f64) -> u32 {
         return DEFAULT_THINKING_STRENGTH;
     }
     clamp_u32(value.round() as u32, 1, 10)
+}
+
+pub fn default_cuda_rollouts_for_options(options: &FindBestMoveOptions) -> u32 {
+    let strength = normalize_thinking_strength(
+        options
+            .thinking_strength
+            .unwrap_or(DEFAULT_THINKING_STRENGTH as f64),
+    );
+    default_cuda_rollouts_for_strength(strength)
+}
+
+fn default_cuda_rollouts_for_strength(strength: u32) -> u32 {
+    match clamp_u32(strength, 1, 10) {
+        1 => 512,
+        2 => 1024,
+        3 => 2048,
+        4 => 4096,
+        5 => 8192,
+        6 => 12288,
+        7 => 16384,
+        8 => 32768,
+        9 => 49152,
+        _ => 65536,
+    }
 }
 
 fn derive_search_config(
@@ -1006,11 +1337,7 @@ fn derive_search_config(
         }
     }
 
-    let time_budget_ms = if strength >= 10 {
-        f64::INFINITY
-    } else {
-        45.0 + (strength * strength * 6) as f64
-    };
+    let time_budget_ms = 45.0 + (strength * strength * 6) as f64;
 
     let chance_cell_limit = if strength >= 9 {
         16
@@ -1025,7 +1352,7 @@ fn derive_search_config(
     };
 
     SearchConfig {
-        depth: clamp_u32(depth, 1, 7) as u8,
+        depth: clamp_u32(depth, 1, MAX_SEARCH_DEPTH) as u8,
         time_budget_ms,
         chance_cell_limit,
         risk_weight: 0.75 + strength as f64 * 0.08,
@@ -1057,7 +1384,11 @@ fn resolve_search_config(board: &Board, options: &FindBestMoveOptions) -> Search
         depth: if use_dynamic_depth {
             config.depth
         } else {
-            clamp_u32(options.max_depth.unwrap_or(config.depth as u32), 1, 7) as u8
+            clamp_u32(
+                options.max_depth.unwrap_or(config.depth as u32),
+                1,
+                MAX_SEARCH_DEPTH,
+            ) as u8
         },
         time_budget_ms: options.time_budget_ms.unwrap_or(config.time_budget_ms),
         ..config
@@ -1109,15 +1440,29 @@ fn select_chance_cells_for_search(
         .collect()
 }
 
+fn find_best_move_with_decision_config(
+    board: Board,
+    options: &FindBestMoveOptions,
+    decision_config: &DecisionConfig,
+) -> Result<Option<SearchDecision>, String> {
+    match decision_config.backend {
+        DecisionBackend::Cpu => Ok(find_best_move_core(board, options)),
+        DecisionBackend::CudaRollout => {
+            cuda_rollout::find_best_move_cuda_rollout(board, options, decision_config)
+        }
+    }
+}
+
 fn find_best_move_core(board: Board, options: &FindBestMoveOptions) -> Option<SearchDecision> {
     let config = resolve_search_config(&board, options);
     let preferred_corner = choose_preferred_corner(&board);
     let start_time = now_ms();
+    let cache_capacity = config.cache_limit.min(1 << 20);
     let mut context = SearchContext {
         config,
         preferred_corner,
         start_time,
-        cache: HashMap::new(),
+        cache: HashMap::with_capacity(cache_capacity),
         metrics: SearchMetrics::default(),
     };
 
@@ -1236,7 +1581,7 @@ fn expectimax(
     context: &mut SearchContext,
 ) -> Result<f64, SearchTimeout> {
     check_timeout(context)?;
-    context.metrics.nodes += 1;
+    context.metrics.nodes = context.metrics.nodes.saturating_add(1);
 
     let cache_key = CacheKey {
         is_chance,
@@ -1244,10 +1589,10 @@ fn expectimax(
         board: *board,
     };
     if let Some(value) = context.cache.get(&cache_key) {
-        context.metrics.cache_hits += 1;
+        context.metrics.cache_hits = context.metrics.cache_hits.saturating_add(1);
         return Ok(*value);
     }
-    context.metrics.cache_misses += 1;
+    context.metrics.cache_misses = context.metrics.cache_misses.saturating_add(1);
 
     let value = if depth == 0 || is_game_over(board) {
         evaluate_board_with_context(board, context)
@@ -1292,7 +1637,7 @@ fn evaluate_chance_node(
     depth: u8,
     context: &mut SearchContext,
 ) -> Result<f64, SearchTimeout> {
-    context.metrics.chance_nodes += 1;
+    context.metrics.chance_nodes = context.metrics.chance_nodes.saturating_add(1);
     let cells = select_chance_cells_for_search(board, &context.config, context.preferred_corner);
     if cells.is_empty() {
         return Ok(evaluate_board_with_context(board, context));
@@ -1382,14 +1727,67 @@ fn run_benchmark_core(
     strategies: &[BenchmarkStrategyConfig],
     max_moves: Option<u32>,
 ) -> Vec<BenchmarkSummary> {
+    let mut ignore_progress = ignore_benchmark_progress;
+    run_benchmark_core_with_progress_and_decision_config(
+        seeds,
+        strategies,
+        max_moves,
+        &DecisionConfig::default(),
+        &mut ignore_progress,
+    )
+    .expect("cpu benchmark backend cannot fail")
+}
+
+fn run_benchmark_core_with_progress(
+    seeds: &[Seed],
+    strategies: &[BenchmarkStrategyConfig],
+    max_moves: Option<u32>,
+    on_progress: &mut dyn FnMut(&BenchmarkProgress),
+) -> Vec<BenchmarkSummary> {
+    run_benchmark_core_with_progress_and_decision_config(
+        seeds,
+        strategies,
+        max_moves,
+        &DecisionConfig::default(),
+        on_progress,
+    )
+    .expect("cpu benchmark backend cannot fail")
+}
+
+fn run_benchmark_core_with_progress_and_decision_config(
+    seeds: &[Seed],
+    strategies: &[BenchmarkStrategyConfig],
+    max_moves: Option<u32>,
+    decision_config: &DecisionConfig,
+    on_progress: &mut dyn FnMut(&BenchmarkProgress),
+) -> Result<Vec<BenchmarkSummary>, String> {
+    let strategy_count = strategies.len();
+    let game_count = seeds.len();
+
     strategies
         .iter()
-        .map(|strategy| {
+        .enumerate()
+        .map(|(strategy_index, strategy)| {
             let results: Vec<BenchmarkGameResult> = seeds
                 .iter()
-                .map(|seed| run_benchmark_game(seed.clone(), strategy, max_moves.unwrap_or(2000)))
-                .collect();
-            summarize_results(strategy.name.clone(), results)
+                .enumerate()
+                .map(|(game_index, seed)| {
+                    run_benchmark_game_with_progress(
+                        seed.clone(),
+                        strategy,
+                        max_moves.unwrap_or(2000),
+                        decision_config,
+                        ProgressScope {
+                            strategy_index,
+                            strategy_count,
+                            game_index,
+                            game_count,
+                        },
+                        on_progress,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(summarize_results(strategy.name.clone(), results))
         })
         .collect()
 }
@@ -1399,6 +1797,63 @@ fn run_benchmark_game(
     strategy: &BenchmarkStrategyConfig,
     max_moves: u32,
 ) -> BenchmarkGameResult {
+    let mut ignore_progress = ignore_benchmark_progress;
+    run_benchmark_game_with_progress(
+        seed,
+        strategy,
+        max_moves,
+        &DecisionConfig::default(),
+        ProgressScope {
+            strategy_index: 0,
+            strategy_count: 1,
+            game_index: 0,
+            game_count: 1,
+        },
+        &mut ignore_progress,
+    )
+    .expect("cpu benchmark backend cannot fail")
+}
+
+fn run_benchmark_game_with_decision_config(
+    seed: Seed,
+    strategy: &BenchmarkStrategyConfig,
+    max_moves: u32,
+    decision_config: &DecisionConfig,
+) -> Result<BenchmarkGameResult, String> {
+    let mut ignore_progress = ignore_benchmark_progress;
+    run_benchmark_game_with_progress(
+        seed,
+        strategy,
+        max_moves,
+        decision_config,
+        ProgressScope {
+            strategy_index: 0,
+            strategy_count: 1,
+            game_index: 0,
+            game_count: 1,
+        },
+        &mut ignore_progress,
+    )
+}
+
+fn ignore_benchmark_progress(_: &BenchmarkProgress) {}
+
+#[derive(Clone, Copy)]
+struct ProgressScope {
+    strategy_index: usize,
+    strategy_count: usize,
+    game_index: usize,
+    game_count: usize,
+}
+
+fn run_benchmark_game_with_progress(
+    seed: Seed,
+    strategy: &BenchmarkStrategyConfig,
+    max_moves: u32,
+    decision_config: &DecisionConfig,
+    progress_scope: ProgressScope,
+    on_progress: &mut dyn FnMut(&BenchmarkProgress),
+) -> Result<BenchmarkGameResult, String> {
     let mut rng = SeededRandom::new(&seed);
     let mut move_counts = MoveCounts::default();
     let mut board = Board::empty();
@@ -1410,7 +1865,8 @@ fn run_benchmark_game(
     let options = FindBestMoveOptions::from(strategy);
 
     while !is_game_over(&board) && steps < max_moves {
-        let Some(decision) = find_best_move_core(board, &options) else {
+        let Some(decision) = find_best_move_with_decision_config(board, &options, decision_config)?
+        else {
             break;
         };
         let Some(direction_name) = decision.best_direction else {
@@ -1433,10 +1889,22 @@ fn run_benchmark_game(
             board = spawn_random_tile(board, &mut rng);
         }
         steps += 1;
+
+        on_progress(&BenchmarkProgress {
+            seed: seed.clone(),
+            strategy_name: strategy.name.clone(),
+            strategy_index: progress_scope.strategy_index,
+            strategy_count: progress_scope.strategy_count,
+            game_index: progress_scope.game_index,
+            game_count: progress_scope.game_count,
+            step: steps,
+            score,
+            max_tile: board.max_tile(),
+        });
     }
 
     let max_tile = board.max_tile();
-    BenchmarkGameResult {
+    Ok(BenchmarkGameResult {
         seed,
         strategy_name: strategy.name.clone(),
         score,
@@ -1447,7 +1915,7 @@ fn run_benchmark_game(
         reached_2048: max_tile >= 2048,
         reached_4096: max_tile >= 4096,
         reached_8192: max_tile >= 8192,
-    }
+    })
 }
 
 fn summarize_results(strategy_name: String, results: Vec<BenchmarkGameResult>) -> BenchmarkSummary {
@@ -1607,7 +2075,7 @@ mod tests {
                 flat[row * SIZE + col] = values[row][col];
             }
         }
-        Board(flat)
+        Board::from_values(&flat).expect("valid test board")
     }
 
     #[test]
@@ -1624,6 +2092,33 @@ mod tests {
         );
         assert_eq!(simulate_move(base, Direction::Up).board.get(0, 0), 4);
         assert_eq!(simulate_move(base, Direction::Down).board.get(3, 0), 4);
+    }
+
+    #[test]
+    fn row_lookup_merges_like_2048() {
+        let row = pack_row([1, 1, 2, 2]);
+        let result = left_row_move(row);
+
+        assert_eq!(
+            [
+                rank_to_tile_value(row_rank(result.row, 0)),
+                rank_to_tile_value(row_rank(result.row, 1)),
+                rank_to_tile_value(row_rank(result.row, 2)),
+                rank_to_tile_value(row_rank(result.row, 3)),
+            ],
+            [4, 8, 0, 0]
+        );
+        assert_eq!(result.score, 12);
+    }
+
+    #[test]
+    fn rejects_values_that_do_not_fit_the_bitboard() {
+        let mut values = [0; CELLS];
+        values[0] = 3;
+        assert!(Board::from_values(&values).is_err());
+
+        values[0] = 1 << (MAX_TILE_EXPONENT + 1);
+        assert!(Board::from_values(&values).is_err());
     }
 
     #[test]
@@ -1677,6 +2172,48 @@ mod tests {
 
         assert_eq!(decision.best_direction.as_deref(), Some("left"));
         assert!(decision.metrics.nodes > 0);
+    }
+
+    #[test]
+    fn cpu_decision_config_uses_expectimax_backend() {
+        let simple = board([[2, 2, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]]);
+        let options = FindBestMoveOptions {
+            thinking_strength: Some(3.0),
+            use_dynamic_depth: Some(false),
+            max_depth: Some(1),
+            time_budget_ms: Some(f64::INFINITY),
+            heuristic_preset: Some(HeuristicPresetName::Balanced),
+        };
+
+        let core = find_best_move_core(simple, &options).expect("expected a core decision");
+        let configured =
+            find_best_move_with_decision_config(simple, &options, &DecisionConfig::default())
+                .expect("cpu backend should not fail")
+                .expect("expected a configured decision");
+
+        assert_eq!(configured.best_direction, core.best_direction);
+        assert_eq!(configured.depth, core.depth);
+    }
+
+    #[test]
+    fn derives_cuda_rollouts_from_strength() {
+        let low = FindBestMoveOptions {
+            thinking_strength: Some(1.0),
+            ..FindBestMoveOptions::default()
+        };
+        let high = FindBestMoveOptions {
+            thinking_strength: Some(10.0),
+            ..FindBestMoveOptions::default()
+        };
+
+        assert_eq!(DecisionConfig::default().resolved_rollouts(&low), 512);
+        assert_eq!(DecisionConfig::default().resolved_rollouts(&high), 65536);
+
+        let explicit = DecisionConfig {
+            rollouts: Some(1234),
+            ..DecisionConfig::default()
+        };
+        assert_eq!(explicit.resolved_rollouts(&high), 1234);
     }
 
     #[test]
